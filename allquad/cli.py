@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repelling", choices=["normal", "axis"], default="normal", help="paper repelling strategy")
     parser.add_argument("--boundary-band", type=float, default=0.55, help="boundary refinement band in cell-size units")
     parser.add_argument("--out", default="outputs/circle", help="output prefix or directory/name")
+    parser.add_argument("--inside-only", action="store_true", help="only output the interior mesh")
     parser.add_argument("--no-plot", action="store_true", help="skip PNG plot generation")
     return parser
 
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> None:
         clearance_ratio=args.clearance_ratio,
         repelling=args.repelling,
         boundary_band=args.boundary_band,
+        include_exterior=not args.inside_only,
     )
     mesh = mesher.generate()
     prefix = Path(args.out)
@@ -44,6 +46,7 @@ def main(argv: list[str] | None = None) -> None:
 
     report = {
         "quality": mesh.quality(),
+        "quality_by_region": mesh.quality_by_region(),
         "topology": mesh.topology(domain.sdf),
     }
     prefix.with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")

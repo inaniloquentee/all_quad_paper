@@ -18,15 +18,19 @@ def main() -> None:
     domain = make_domain(args.domain)
     mesh = AllQuadMesher(domain, max_depth=args.max_depth).generate()
     quality = mesh.quality()
+    by_region = mesh.quality_by_region()
     topology = mesh.topology(domain.sdf)
 
     assert quality["quads"] > 0
+    assert by_region["interior"]["quads"] > 0
+    assert by_region["exterior"]["quads"] > 0
     assert quality["min_area"] > 0.0
     assert topology["nonmanifold_edges"] == 0.0
+    assert topology["interface_edges"] > 0
     assert quality["max_angle"] < 180.0
     assert quality["min_angle"] > 0.0
 
-    report = {"quality": quality, "topology": topology}
+    report = {"quality": quality, "quality_by_region": by_region, "topology": topology}
     Path("outputs").mkdir(exist_ok=True)
     Path(f"outputs/check_{args.domain}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

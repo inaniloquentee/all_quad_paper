@@ -69,6 +69,7 @@ def clean_polygon(points: Iterable[np.ndarray], tol: float = 1.0e-10) -> np.ndar
 class Mesh:
     vertices: List[np.ndarray] = field(default_factory=list)
     quads: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    regions: List[int] = field(default_factory=list)
     tol: float = 1.0e-10
     _index: Dict[Tuple[int, int], int] = field(default_factory=dict, init=False)
 
@@ -83,7 +84,7 @@ class Mesh:
         self._index[key] = idx
         return idx
 
-    def add_quad(self, points: Iterable[np.ndarray]) -> bool:
+    def add_quad(self, points: Iterable[np.ndarray], region: int = 0) -> bool:
         quad = clean_polygon(points, self.tol)
         if len(quad) != 4:
             return False
@@ -96,9 +97,10 @@ class Mesh:
         if len(set(ids)) != 4:
             return False
         self.quads.append(ids)  # type: ignore[arg-type]
+        self.regions.append(region)
         return True
 
-    def add_midpoint_subdivision(self, points: Iterable[np.ndarray]) -> int:
+    def add_midpoint_subdivision(self, points: Iterable[np.ndarray], region: int = 0) -> int:
         poly = clean_polygon(points, self.tol)
         if len(poly) < 3:
             return 0
@@ -108,12 +110,17 @@ class Mesh:
         for i, vertex in enumerate(poly):
             prev_mid = mids[(i - 1) % len(poly)]
             next_mid = mids[i]
-            if self.add_quad([vertex, next_mid, center, prev_mid]):
+            if self.add_quad([vertex, next_mid, center, prev_mid], region=region):
                 count += 1
         return count
 
-    def quality(self) -> Dict[str, float]:
-        if not self.quads:
+    def quality(self, region: int | None = None) -> Dict[str, float]:
+        selected = [
+            (quad, reg)
+            for quad, reg in zip(self.quads, self.regions)
+            if region is None or reg == region
+        ]
+        if not selected:
             return {
                 "vertices": float(len(self.vertices)),
                 "quads": 0.0,
@@ -127,7 +134,9 @@ class Mesh:
         angles = []
         ratios = []
         areas = []
-        for quad in self.quads:
+        used_vertices = set()
+        for quad, _region in selected:
+            used_vertices.update(quad)
             q = pts[list(quad)]
             areas.append(abs(polygon_area(q)))
             edges = np.linalg.norm(q - np.roll(q, -1, axis=0), axis=1)
@@ -142,8 +151,8 @@ class Mesh:
                 angles.append(math_degrees_acos(cosv))
 
         return {
-            "vertices": float(len(self.vertices)),
-            "quads": float(len(self.quads)),
+            "vertices": float(len(used_vertices)),
+            "quads": float(len(selected)),
             "min_angle": float(np.min(angles)),
             "max_angle": float(np.max(angles)),
             "min_edge_ratio": float(np.min(ratios)),
@@ -152,13 +161,22 @@ class Mesh:
             "max_area": float(np.max(areas)),
         }
 
+    def quality_by_region(self) -> Dict[str, Dict[str, float]]:
+        labels = {-1: "interior", 1: "exterior"}
+        return {
+            labels.get(region, str(region)): self.quality(region=region)
+            for region in sorted(set(self.regions))
+        }
+
     def topology(self, boundary_sdf=None) -> Dict[str, float]:
         edge_use: Dict[Tuple[int, int], int] = {}
-        for quad in self.quads:
+        edge_regions: Dict[Tuple[int, int], set[int]] = {}
+        for quad, region in zip(self.quads, self.regions):
             for i, a in enumerate(quad):
                 b = quad[(i + 1) % 4]
                 edge = (a, b) if a < b else (b, a)
                 edge_use[edge] = edge_use.get(edge, 0) + 1
+                edge_regions.setdefault(edge, set()).add(region)
 
         boundary_edges = [edge for edge, count in edge_use.items() if count == 1]
         nonmanifold = sum(1 for count in edge_use.values() if count > 2)
@@ -167,11 +185,16 @@ class Mesh:
             "boundary_edges": float(len(boundary_edges)),
             "nonmanifold_edges": float(nonmanifold),
         }
-        if boundary_sdf is not None and boundary_edges:
+        interface_edges = [
+            edge for edge, regions in edge_regions.items() if regions == {-1, 1}
+        ]
+        result["interface_edges"] = float(len(interface_edges))
+        if boundary_sdf is not None and interface_edges:
             pts = np.asarray(self.vertices)
-            mids = np.asarray([0.5 * (pts[a] + pts[b]) for a, b in boundary_edges])
+            mids = np.asarray([0.5 * (pts[a] + pts[b]) for a, b in interface_edges])
             distances = np.abs(np.asarray(boundary_sdf(mids), dtype=float))
-            result["max_boundary_midpoint_error"] = float(np.max(distances))
+            result["max_interface_midpoint_error"] = float(np.max(distances))
+            result["avg_interface_midpoint_error"] = float(np.mean(distances))
         return result
 
     def write_obj(self, path: str | Path) -> None:
@@ -181,7 +204,12 @@ class Mesh:
             f.write("# all-quad mesh\n")
             for p in self.vertices:
                 f.write(f"v {p[0]:.12g} {p[1]:.12g} 0\n")
-            for q in self.quads:
+            current_region = None
+            for q, region in zip(self.quads, self.regions):
+                if region != current_region:
+                    current_region = region
+                    name = "interior" if region < 0 else "exterior" if region > 0 else "unknown"
+                    f.write(f"g {name}\n")
                 f.write("f " + " ".join(str(i + 1) for i in q) + "\n")
 
     def write_vtk(self, path: str | Path) -> None:
@@ -201,6 +229,11 @@ class Mesh:
             f.write(f"CELL_TYPES {len(self.quads)}\n")
             for _ in self.quads:
                 f.write("9\n")
+            f.write(f"CELL_DATA {len(self.quads)}\n")
+            f.write("SCALARS region int 1\n")
+            f.write("LOOKUP_TABLE default\n")
+            for region in self.regions:
+                f.write(f"{region}\n")
 
 
 def math_degrees_acos(value: float) -> float:

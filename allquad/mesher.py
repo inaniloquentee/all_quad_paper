@@ -22,6 +22,7 @@ class AllQuadMesher:
     repelling: str = "normal"
     boundary_band: float = 0.55
     tol: float = 1.0e-10
+    include_exterior: bool = True
 
     def generate(self) -> Mesh:
         tree = Quadtree.build(
@@ -48,14 +49,15 @@ class AllQuadMesher:
             poly = self._cell_polygon(tree, cell, moved_points, x_index, y_index)
             if len(poly) < 3:
                 continue
-            clipped, was_cut = self._inside_polygon(poly)
-            if len(clipped) < 3:
-                continue
-            # Applying midpoint subdivision consistently on both sides of every
-            # shared segment is a generic closure of the paper's local 2-ref
-            # templates. It keeps the implementation compact while producing a
-            # conforming all-quad mesh at adaptive transitions.
-            mesh.add_midpoint_subdivision(clipped)
+            pieces = self._split_polygon(poly)
+            for clipped, region in pieces:
+                if len(clipped) < 3:
+                    continue
+                # Applying midpoint subdivision consistently on both sides of every
+                # shared segment is a generic closure of the paper's local 2-ref
+                # templates. It keeps the implementation compact while producing a
+                # conforming all-quad mesh at adaptive transitions.
+                mesh.add_midpoint_subdivision(clipped, region=region)
         return mesh
 
     def _perturb_internal_hanging_points(
@@ -113,32 +115,42 @@ class AllQuadMesher:
         original.extend(points_on_vertical(x_index, x0, y0, y1, reverse=True)[1:])
         return clean_polygon([moved_points[round_point(p)] for p in original], self.tol)
 
-    def _inside_polygon(self, polygon: np.ndarray) -> Tuple[np.ndarray, bool]:
+    def _split_polygon(self, polygon: np.ndarray) -> List[Tuple[np.ndarray, int]]:
+        pieces: List[Tuple[np.ndarray, int]] = []
+        inside = self._clip_polygon(polygon, keep_inside=True)
+        if len(inside) >= 3:
+            pieces.append((inside, -1))
+        if self.include_exterior:
+            outside = self._clip_polygon(polygon, keep_inside=False)
+            if len(outside) >= 3:
+                pieces.append((outside, 1))
+        return pieces
+
+    def _clip_polygon(self, polygon: np.ndarray, keep_inside: bool) -> np.ndarray:
         vals = np.asarray(self.domain.sdf(polygon), dtype=float)
         inside = vals <= 0.0
-        has_inside = bool(np.any(inside))
-        has_outside = bool(np.any(~inside))
-        if has_inside and not has_outside:
-            return polygon, False
-        if not has_inside and not has_outside:
-            return np.empty((0, 2), dtype=float), False
+        keep = inside if keep_inside else ~inside
+        has_keep = bool(np.any(keep))
+        has_other = bool(np.any(~keep))
+        if has_keep and not has_other:
+            return clean_polygon(polygon, self.tol)
+        if not has_keep:
+            return np.empty((0, 2), dtype=float)
 
         clipped: List[np.ndarray] = []
         n = len(polygon)
-        was_cut = False
         for i in range(n):
             a = polygon[i]
             b = polygon[(i + 1) % n]
             da = float(vals[i])
             db = float(vals[(i + 1) % n])
-            a_inside = da <= 0.0
-            b_inside = db <= 0.0
-            if a_inside:
+            a_keep = (da <= 0.0) if keep_inside else (da > 0.0)
+            b_keep = (db <= 0.0) if keep_inside else (db > 0.0)
+            if a_keep:
                 clipped.append(a)
-            if a_inside != b_inside:
+            if a_keep != b_keep:
                 clipped.append(self.domain.segment_intersection(a, b, da, db))
-                was_cut = True
-        return clean_polygon(clipped, self.tol), was_cut
+        return clean_polygon(clipped, self.tol)
 
 
 def build_side_indices(points: Iterable[Point]) -> Tuple[Dict[float, List[Point]], Dict[float, List[Point]]]:

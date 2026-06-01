@@ -15,9 +15,16 @@ def plot_mesh(mesh: Mesh, domain: SDFDomain, path: str | Path, samples: int = 40
     pts = np.asarray(mesh.vertices)
 
     fig, ax = plt.subplots(figsize=(7, 7))
-    for quad in mesh.quads:
+    colors = {-1: "#1f2933", 1: "#7a8793"}
+    widths = {-1: 0.45, 1: 0.35}
+    for quad, region in zip(mesh.quads, mesh.regions):
         q = pts[list(quad) + [quad[0]]]
-        ax.plot(q[:, 0], q[:, 1], color="#1f2933", linewidth=0.45)
+        ax.plot(
+            q[:, 0],
+            q[:, 1],
+            color=colors.get(region, "#1f2933"),
+            linewidth=widths.get(region, 0.4),
+        )
 
     xmin, ymin, xmax, ymax = domain.bounds
     xs = np.linspace(xmin, xmax, samples)
@@ -31,7 +38,9 @@ def plot_mesh(mesh: Mesh, domain: SDFDomain, path: str | Path, samples: int = 40
     ax.set_ylim(ymin, ymax)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_title(f"{domain.name}: {len(mesh.quads)} quads")
+    inside = sum(1 for region in mesh.regions if region < 0)
+    outside = sum(1 for region in mesh.regions if region > 0)
+    ax.set_title(f"{domain.name}: {inside} inside + {outside} outside quads")
     fig.tight_layout()
     fig.savefig(target, dpi=220)
     plt.close(fig)
