@@ -14,6 +14,8 @@ def main() -> None:
     parser.add_argument("--domain", default="circle")
     parser.add_argument("--input-json")
     parser.add_argument("--max-depth", type=int, default=5)
+    parser.add_argument("--min-angle", type=float, default=15.0)
+    parser.add_argument("--max-angle", type=float, default=165.0)
     args = parser.parse_args()
 
     domain = load_polyline_domain(args.input_json) if args.input_json else make_domain(args.domain)
@@ -28,8 +30,8 @@ def main() -> None:
     assert quality["min_area"] > 0.0
     assert topology["nonmanifold_edges"] == 0.0
     assert topology["interface_edges"] > 0
-    assert quality["max_angle"] < 180.0
-    assert quality["min_angle"] > 0.0
+    assert quality["max_angle"] <= args.max_angle
+    assert quality["min_angle"] >= args.min_angle
 
     report = {"quality": quality, "quality_by_region": by_region, "topology": topology}
     Path("outputs").mkdir(exist_ok=True)

@@ -23,11 +23,13 @@ class AllQuadMesher:
     boundary_band: float = 0.55
     tol: float = 1.0e-10
     include_exterior: bool = True
+    adaptive: bool = False
 
     def generate(self) -> Mesh:
+        min_depth = self.min_depth if self.adaptive else self.max_depth
         tree = Quadtree.build(
             self.domain,
-            min_depth=self.min_depth,
+            min_depth=min_depth,
             max_depth=self.max_depth,
             boundary_band=self.boundary_band,
         )
@@ -42,62 +44,50 @@ class AllQuadMesher:
             for p in grid_points
         }
         x_index, y_index = build_side_indices(grid_points)
-        self._perturb_internal_hanging_points(tree, moved_points, x_index, y_index, incident_sizes)
 
         mesh = Mesh(tol=self.tol)
         for cell in sorted(tree.leaves):
             poly = self._cell_polygon(tree, cell, moved_points, x_index, y_index)
             if len(poly) < 3:
                 continue
+            vals = np.asarray(self.domain.sdf(poly), dtype=float)
+            if not (np.any(vals <= 0.0) and np.any(vals > 0.0)):
+                region = -1 if float(np.mean(vals)) <= 0.0 else 1
+                if region < 0 or self.include_exterior:
+                    self._add_empty_cell(mesh, tree, cell, moved_points, x_index, y_index, region)
+                continue
             pieces = self._split_polygon(poly)
             for clipped, region in pieces:
                 if len(clipped) < 3:
                     continue
-                # Applying midpoint subdivision consistently on both sides of every
-                # shared segment is a generic closure of the paper's local 2-ref
-                # templates. It keeps the implementation compact while producing a
-                # conforming all-quad mesh at adaptive transitions.
                 mesh.add_midpoint_subdivision(clipped, region=region)
         return mesh
 
-    def _perturb_internal_hanging_points(
+    def _add_empty_cell(
         self,
+        mesh: Mesh,
         tree: Quadtree,
+        cell: Cell,
         moved_points: Dict[Point, np.ndarray],
         x_index: Dict[float, List[Point]],
         y_index: Dict[float, List[Point]],
-        incident_sizes: Dict[Point, float],
+        region: int,
     ) -> None:
-        """Avoid 180-degree midpoint-subdivision angles at transition nodes."""
-
-        shifts: Dict[Point, np.ndarray] = {}
-        for cell in tree.leaves:
-            x0, y0, x1, y1 = tree.bounds(cell)
-            center = np.array([0.5 * (x0 + x1), 0.5 * (y0 + y1)])
-            side_points = (
-                points_on_horizontal(y_index, y0, x0, x1, reverse=False)[1:-1],
-                points_on_vertical(x_index, x1, y0, y1, reverse=False)[1:-1],
-                points_on_horizontal(y_index, y1, x0, x1, reverse=False)[1:-1],
-                points_on_vertical(x_index, x0, y0, y1, reverse=False)[1:-1],
+        x0, y0, x1, y1 = tree.bounds(cell)
+        corners = [moved_points[round_point(p)] for p in tree.corners(cell)]
+        side_nodes = [
+            points_on_horizontal(y_index, y0, x0, x1, reverse=False)[1:-1],
+            points_on_vertical(x_index, x1, y0, y1, reverse=False)[1:-1],
+            points_on_horizontal(y_index, y1, x0, x1, reverse=False)[1:-1],
+            points_on_vertical(x_index, x0, y0, y1, reverse=False)[1:-1],
+        ]
+        if not self.adaptive or any(side_nodes):
+            mesh.add_midpoint_subdivision(
+                self._cell_polygon(tree, cell, moved_points, x_index, y_index),
+                region=region,
             )
-            for side in side_points:
-                for point in side:
-                    key = round_point(point)
-                    direction = center - np.asarray(key)
-                    length = np.linalg.norm(direction)
-                    if length > self.tol:
-                        shifts[key] = shifts.get(key, np.zeros(2)) + direction / length
-
-        for point, direction in shifts.items():
-            length = np.linalg.norm(direction)
-            if length <= self.tol:
-                continue
-            delta = 0.08 * incident_sizes[point] * direction / length
-            candidate = moved_points[point] + delta
-            original_sign = float(self.domain.sdf(moved_points[point]))
-            candidate_sign = float(self.domain.sdf(candidate))
-            if original_sign == 0.0 or original_sign * candidate_sign >= 0.0:
-                moved_points[point] = candidate
+            return
+        mesh.add_quad(corners, region=region)
 
     def _cell_polygon(
         self,

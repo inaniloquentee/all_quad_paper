@@ -132,14 +132,15 @@ class PolylineDomain(SDFDomain):
 
     def normal(self, point: ArrayLike, h: float = 1.0e-6) -> np.ndarray:
         p = np.asarray(point, dtype=float)
-        closest, _distance, _edge = self.closest_point(p)
-        n = p - closest
+        _closest, _distance, edge = self.closest_point(p)
+        loop = self.loops[edge[0]]
+        a = loop[edge[1]]
+        b = loop[(edge[1] + 1) % len(loop)]
+        tangent = b - a
+        # Loops are oriented so the positive signed-distance side is always to
+        # the right of each directed segment: exterior loop CCW, holes CW.
+        n = np.array([tangent[1], -tangent[0]])
         length = np.linalg.norm(n)
-        if length <= 1.0e-14:
-            a, b = self._nearest_segment(p)
-            tangent = b - a
-            n = np.array([tangent[1], -tangent[0]])
-            length = np.linalg.norm(n)
         if length <= 1.0e-14:
             return np.array([1.0, 0.0])
         return n / length
