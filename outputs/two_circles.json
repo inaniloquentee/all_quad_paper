@@ -1,0 +1,18 @@
+{
+  "quality": {
+    "vertices": 5333.0,
+    "quads": 4976.0,
+    "min_angle": 26.24744015139229,
+    "max_angle": 170.85215748019843,
+    "min_edge_ratio": 0.23547753769786356,
+    "avg_edge_ratio": 0.744714532797317,
+    "min_area": 4.993338196479513e-06,
+    "max_area": 0.005166015625000006
+  },
+  "topology": {
+    "edges": 10308.0,
+    "boundary_edges": 712.0,
+    "nonmanifold_edges": 0.0,
+    "max_boundary_midpoint_error": 6.303382588190853e-05
+  }
+}
