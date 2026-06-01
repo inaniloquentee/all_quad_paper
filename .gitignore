@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local paper source and extracted text are not committed.
+all_quad_paper.pdf
+paper_text.txt
+pdf_streams.txt
+
+# Generated demo meshes and plots can be rebuilt with README commands.
+outputs/
