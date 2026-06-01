@@ -1,0 +1,42 @@
+{
+  "quality": {
+    "vertices": 34055.0,
+    "quads": 33960.0,
+    "min_angle": 6.581944655176696,
+    "max_angle": 173.41805534482648,
+    "min_edge_ratio": 0.0020310050241326566,
+    "avg_edge_ratio": 0.7481538937087411,
+    "min_area": 9.82113723679845e-10,
+    "max_area": 0.005946596088436618
+  },
+  "quality_by_region": {
+    "interior": {
+      "vertices": 18085.0,
+      "quads": 16992.0,
+      "min_angle": 6.581944655176696,
+      "max_angle": 173.41805534482242,
+      "min_edge_ratio": 0.0020310050241326566,
+      "avg_edge_ratio": 0.7423009854842276,
+      "min_area": 9.82113723679845e-10,
+      "max_area": 0.005884456597222698
+    },
+    "exterior": {
+      "vertices": 18154.0,
+      "quads": 16968.0,
+      "min_angle": 6.581944655177251,
+      "max_angle": 173.41805534482648,
+      "min_edge_ratio": 0.016662238885065395,
+      "avg_edge_ratio": 0.7540150804455948,
+      "min_area": 4.619473228939519e-08,
+      "max_area": 0.005946596088436618
+    }
+  },
+  "topology": {
+    "edges": 68016.0,
+    "boundary_edges": 192.0,
+    "nonmanifold_edges": 0.0,
+    "interface_edges": 2184.0,
+    "max_interface_midpoint_error": 0.0017784632109554635,
+    "avg_interface_midpoint_error": 8.533475388374317e-06
+  }
+}

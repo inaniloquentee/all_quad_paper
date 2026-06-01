@@ -27,11 +27,16 @@ def plot_mesh(mesh: Mesh, domain: SDFDomain, path: str | Path, samples: int = 40
         )
 
     xmin, ymin, xmax, ymax = domain.bounds
-    xs = np.linspace(xmin, xmax, samples)
-    ys = np.linspace(ymin, ymax, samples)
-    xx, yy = np.meshgrid(xs, ys)
-    zz = domain.sdf(np.stack([xx, yy], axis=-1))
-    ax.contour(xx, yy, zz, levels=[0.0], colors=["#d62828"], linewidths=1.2)
+    if hasattr(domain, "loops"):
+        for loop in domain.loops:
+            closed = np.vstack([loop, loop[:1]])
+            ax.plot(closed[:, 0], closed[:, 1], color="#d62828", linewidth=1.2)
+    else:
+        xs = np.linspace(xmin, xmax, samples)
+        ys = np.linspace(ymin, ymax, samples)
+        xx, yy = np.meshgrid(xs, ys)
+        zz = domain.sdf(np.stack([xx, yy], axis=-1))
+        ax.contour(xx, yy, zz, levels=[0.0], colors=["#d62828"], linewidths=1.2)
 
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(xmin, xmax)

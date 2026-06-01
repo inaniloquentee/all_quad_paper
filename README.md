@@ -10,7 +10,7 @@ Implemented pipeline:
    at most one level.
 2. Repel quadtree nodes away from the input boundary by `D = s / 4`, using
    either boundary-normal or grid-axis movement.
-3. Split cells cut by the geometry with implicit boundary intersections and
+3. Split cells cut by the geometry with closed polyline boundary intersections and
    keep both interior and exterior polygons.
 4. Convert cut polygons, deformed polygons, and hanging-node polygons into
    quads with midpoint subdivision. Shared edges are subdivided consistently;
@@ -18,18 +18,38 @@ Implemented pipeline:
 5. Export OBJ, legacy VTK, PNG preview, region labels, and mesh quality metrics.
 
 The code is self-contained and uses only `numpy` and `matplotlib` at runtime.
-The current geometry interface is implicit signed-distance style. It reproduces
-the smooth-boundary cases from the paper directly; sharp feature preservation is
-represented by star-like implicit examples, but exact PSLG vertex insertion is
-left as a clear extension point.
+The primary input is a discrete closed polyline JSON file, matching the paper's
+line-segment boundary model. Formula-based domains are still available only as
+quick demos.
 
 ## Run
 
 ```powershell
-python -m allquad --domain circle --max-depth 6 --out outputs/circle
-python -m allquad --domain flower --max-depth 7 --out outputs/flower
-python -m allquad --domain two_circles --max-depth 7 --out outputs/two_circles
+python -m allquad --input-json examples/wobbly_loop.json --max-depth 7 --out outputs/wobbly_loop
+python -m allquad --input-json examples/concave_polygon.json --max-depth 7 --out outputs/concave_polygon
+python -m allquad --input-json examples/box_with_hole.json --max-depth 7 --out outputs/box_with_hole
 ```
+
+JSON formats:
+
+```json
+{"name": "shape", "points": [[0, 0], [1, 0], [0.5, 1]]}
+```
+
+or, for holes:
+
+```json
+{
+  "name": "shape_with_holes",
+  "loops": [
+    [[-1, -1], [1, -1], [1, 1], [-1, 1]],
+    [[-0.25, -0.25], [-0.25, 0.25], [0.25, 0.25], [0.25, -0.25]]
+  ]
+}
+```
+
+Loops are automatically closed, so the last point does not need to repeat the
+first point.
 
 Outputs:
 
@@ -47,12 +67,13 @@ Useful parameters:
 - `--min-depth` and `--max-depth`: background quadtree resolution.
 - `--inside-only`: omit the exterior mesh if you only want the old one-sided
   output.
+- `--domain circle`: use a built-in analytic demo instead of `--input-json`.
 
 ## Verification
 
 ```powershell
 python -m compileall allquad tools
-python tools/check_mesh.py --domain circle --max-depth 5
+python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
@@ -62,9 +83,8 @@ regions.
 
 ## Notes on fidelity
 
-The paper treats input geometry as curves and vertices, then explicitly inserts
-sharp geometric vertices before midpoint subdivision. This reproduction focuses
-on the same meshing pipeline for implicit 2D domains. Smooth domains such as
-`circle` and `two_circles` are closest to the analyzed setting. The `star` demo
-is useful for stress testing, but it is not the exact PSLG sharp-feature
-handling from Fig. 6.
+The paper treats input geometry as curves and vertices. This implementation now
+uses piecewise-linear closed loops as the main input, so arbitrary shapes can be
+meshed without writing formulas. Exact sharp-feature templates from Fig. 6 are
+approximated by the same segment intersection and midpoint subdivision pipeline;
+adding vertex-specific templates is the next fidelity step.

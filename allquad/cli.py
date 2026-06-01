@@ -4,14 +4,15 @@ import argparse
 import json
 from pathlib import Path
 
-from .domain import make_domain
+from .domain import load_polyline_domain, make_domain
 from .mesher import AllQuadMesher
 from .plotting import plot_mesh
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Reproduce the all-quad meshing without cleanup algorithm.")
-    parser.add_argument("--domain", default="circle", help="circle, flower, rounded_square, star, two_circles")
+    parser.add_argument("--domain", default="circle", help="built-in demo: circle, flower, rounded_square, star, two_circles")
+    parser.add_argument("--input-json", help="closed polyline JSON file with 'points' or 'loops'")
     parser.add_argument("--min-depth", type=int, default=2, help="minimum quadtree depth")
     parser.add_argument("--max-depth", type=int, default=6, help="maximum quadtree depth near the boundary")
     parser.add_argument("--clearance-ratio", type=float, default=0.25, help="repelling distance as a fraction of local cell size")
@@ -25,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    domain = make_domain(args.domain)
+    domain = load_polyline_domain(args.input_json) if args.input_json else make_domain(args.domain)
     mesher = AllQuadMesher(
         domain,
         min_depth=args.min_depth,
