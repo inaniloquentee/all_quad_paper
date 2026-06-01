@@ -16,10 +16,11 @@ def main() -> None:
     parser.add_argument("--max-depth", type=int, default=5)
     parser.add_argument("--min-angle", type=float, default=15.0)
     parser.add_argument("--max-angle", type=float, default=165.0)
+    parser.add_argument("--adaptive", action="store_true", help="exercise adaptive quadtree 2-ref transitions")
     args = parser.parse_args()
 
     domain = load_polyline_domain(args.input_json) if args.input_json else make_domain(args.domain)
-    mesh = AllQuadMesher(domain, max_depth=args.max_depth).generate()
+    mesh = AllQuadMesher(domain, max_depth=args.max_depth, adaptive=args.adaptive).generate()
     quality = mesh.quality()
     by_region = mesh.quality_by_region()
     topology = mesh.topology(domain.sdf)

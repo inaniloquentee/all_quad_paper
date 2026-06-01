@@ -6,15 +6,15 @@ Rushdi et al., "All-quad meshing without cleanup", Computer-Aided Design 85
 
 Implemented pipeline:
 
-1. Build a background grid. The default path uses a uniform grid for quality;
-   adaptive quadtree mode is available behind `--adaptive`.
+1. Build a background grid. The default path uses a uniform grid; adaptive
+   quadtree mode is available with `--adaptive`.
 2. Repel quadtree nodes away from the input boundary by `D = s / 4`, using
    either boundary-normal or grid-axis movement.
 3. Split cells cut by the geometry with closed polyline boundary intersections and
    keep both interior and exterior polygons.
 4. Convert cut polygons and deformed polygons into quads with midpoint
-   subdivision. Empty grid cells remain single quads in the default uniform
-   mode.
+   subdivision. Empty adaptive cells use two-refinement transition templates,
+   including a structured closure for propagated hanging-node chains.
 5. Export OBJ, legacy VTK, PNG preview, region labels, and mesh quality metrics.
 
 The code is self-contained and uses only `numpy` and `matplotlib` at runtime.
@@ -28,6 +28,7 @@ quick demos.
 python -m allquad --input-json examples/wobbly_loop.json --max-depth 7 --out outputs/wobbly_loop
 python -m allquad --input-json examples/concave_polygon.json --max-depth 7 --out outputs/concave_polygon
 python -m allquad --input-json examples/box_with_hole.json --max-depth 7 --out outputs/box_with_hole
+python -m allquad --input-json examples/concave_polygon.json --adaptive --max-depth 7 --out outputs/concave_polygon_adaptive
 ```
 
 JSON formats:
@@ -68,21 +69,22 @@ Useful parameters:
 - `--inside-only`: omit the exterior mesh if you only want the old one-sided
   output.
 - `--domain circle`: use a built-in analytic demo instead of `--input-json`.
-- `--adaptive`: experimental adaptive quadtree mode. Production-quality
-  adaptive output still needs the full paper 2-ref corner-marking templates.
+- `--adaptive`: adaptive quadtree mode with 2-ref transition templates for
+  coarse/fine interfaces.
 
 ## Verification
 
 ```powershell
 python -m compileall allquad tools
 python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
+python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 24 --max-angle 156
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
 both interior and exterior elements, has no nonmanifold edges, has no degenerate
-angles outside the configured quality range, and that detected
-geometry-boundary edges are shared by both regions. The default regression range
-is `15` to `165` degrees; smoother inputs should be checked with tighter limits.
+angles outside the configured quality range, and that detected geometry-boundary
+edges are present. The default regression range is `15` to `165` degrees;
+smoother inputs should be checked with tighter limits.
 
 ## Notes on fidelity
 
@@ -92,8 +94,8 @@ meshed without writing formulas. Exact sharp-feature templates from Fig. 6 are
 approximated by the same segment intersection and midpoint subdivision pipeline;
 adding vertex-specific templates is the next fidelity step.
 
-Adaptive transitions are the remaining important gap. The paper resolves
-coarse/fine quadtree interfaces using two-refinement (2-ref) templates with
-corner marking. A generic midpoint-subdivision substitute can create near-180
-degree transition elements, so the default path intentionally avoids adaptive
-transitions until the full 2-ref templates are implemented.
+Adaptive transitions now use the paper's two-refinement (2-ref) idea for
+coarse/fine interfaces. Standard single-midpoint sides use the Fig. 7 templates;
+when midpoint subdivision near geometry propagates longer hanging-node chains,
+the implementation closes them with a structured 2-ref-compatible template so
+the mesh remains all-quad and avoids near-180 degree transition elements.

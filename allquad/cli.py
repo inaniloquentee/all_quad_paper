@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--boundary-band", type=float, default=0.55, help="boundary refinement band in cell-size units")
     parser.add_argument("--out", default="outputs/circle", help="output prefix or directory/name")
     parser.add_argument("--inside-only", action="store_true", help="only output the interior mesh")
-    parser.add_argument("--adaptive", action="store_true", help="experimental adaptive quadtree mode; requires full 2-ref templates for production quality")
+    parser.add_argument("--adaptive", action="store_true", help="adaptive quadtree mode with 2-ref transition templates")
     parser.add_argument("--no-plot", action="store_true", help="skip PNG plot generation")
     return parser
 
