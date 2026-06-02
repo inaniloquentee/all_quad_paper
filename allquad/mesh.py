@@ -25,6 +25,13 @@ def polygon_centroid(points: np.ndarray) -> np.ndarray:
     return np.array([cx, cy], dtype=float)
 
 
+def midpoint_subdivision_center(points: np.ndarray) -> np.ndarray:
+    poly = np.asarray(points, dtype=float)
+    if len(poly) == 4:
+        return np.mean(poly, axis=0)
+    return polygon_centroid(poly)
+
+
 def clean_polygon(points: Iterable[np.ndarray], tol: float = 1.0e-10) -> np.ndarray:
     cleaned: List[np.ndarray] = []
     for p in points:
@@ -104,7 +111,7 @@ class Mesh:
         poly = clean_polygon(points, self.tol)
         if len(poly) < 3:
             return 0
-        center = polygon_centroid(poly)
+        center = midpoint_subdivision_center(poly)
         mids = 0.5 * (poly + np.roll(poly, -1, axis=0))
         count = 0
         for i, vertex in enumerate(poly):
@@ -195,6 +202,10 @@ class Mesh:
             distances = np.abs(np.asarray(boundary_sdf(mids), dtype=float))
             result["max_interface_midpoint_error"] = float(np.max(distances))
             result["avg_interface_midpoint_error"] = float(np.mean(distances))
+            endpoints = np.asarray([pts[idx] for edge in interface_edges for idx in edge])
+            endpoint_distances = np.abs(np.asarray(boundary_sdf(endpoints), dtype=float))
+            result["max_interface_endpoint_error"] = float(np.max(endpoint_distances))
+            result["avg_interface_endpoint_error"] = float(np.mean(endpoint_distances))
         return result
 
     def write_obj(self, path: str | Path) -> None:

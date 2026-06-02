@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from .domain import SDFDomain
-from .mesh import Mesh, clean_polygon, polygon_centroid
+from .domain import SDFDomain, segment_parameters
+from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_centroid
 from .quadtree import Cell, Quadtree, round_point
 
 
@@ -58,6 +59,8 @@ class AllQuadMesher:
             )
             for p in grid_points
         }
+        if self.adaptive:
+            self._pull_sharp_cell_side_midpoints(tree, moved_points)
         moved_keys = {mesh_key(point, self.tol): key for key, point in moved_points.items()}
         x_index, y_index = build_side_indices(grid_points)
 
@@ -69,12 +72,14 @@ class AllQuadMesher:
             if len(poly) < 3:
                 continue
             vals = np.asarray(self.domain.sdf(poly), dtype=float)
-            if not (np.any(vals <= 0.0) and np.any(vals > 0.0)):
+            sign_cut = bool(np.any(vals <= 0.0) and np.any(vals > 0.0))
+            boundary_cut = self._cell_may_be_cut(tree, cell)
+            if not (sign_cut or boundary_cut):
                 region = -1 if float(np.mean(vals)) <= 0.0 else 1
                 if region < 0 or self.include_exterior:
                     self._add_empty_cell(mesh, tree, cell, moved_points, x_index, y_index, region)
                 continue
-            pieces = self._split_polygon(poly)
+            pieces = self._split_cell_polygon(tree, cell, poly, moved_points)
             for clipped, region in pieces:
                 if len(clipped) < 3:
                     continue
@@ -98,6 +103,7 @@ class AllQuadMesher:
                 db = float(self.domain.sdf(pb))
                 if da * db > 0.0:
                     augmented.add(round_point(tuple(0.5 * (pa + pb))))
+            augmented.update(self._sharp_side_midpoint_keys(tree, cell))
 
         protected_sides = self._cut_neighbor_sides(tree, cut_cells)
         for _iteration in range(64):
@@ -168,6 +174,8 @@ class AllQuadMesher:
 
     def _cell_may_be_cut(self, tree: Quadtree, cell: Cell) -> bool:
         x0, y0, x1, y1 = tree.bounds(cell)
+        if hasattr(self.domain, "segments_in_box"):
+            return bool(self.domain.segments_in_box((x0, y0, x1, y1), self.tol))
         pts = np.array(
             [
                 [x0, y0],
@@ -183,6 +191,76 @@ class AllQuadMesher:
         )
         vals = np.asarray(self.domain.sdf(pts), dtype=float)
         return bool(np.any(vals <= 0.0) and np.any(vals > 0.0))
+
+    def _sharp_side_midpoint_keys(self, tree: Quadtree, cell: Cell) -> set[Point]:
+        if not hasattr(self.domain, "vertices_in_box") or not hasattr(self.domain, "segments_in_box"):
+            return set()
+        bounds = tree.bounds(cell)
+        vertices = [
+            vertex
+            for vertex in self.domain.vertices_in_box(bounds, self.tol)
+            if self.domain.is_sharp_vertex(*vertex)
+        ]
+        if len(vertices) != 1:
+            return set()
+
+        x0, y0, x1, y1 = bounds
+        side_hits = self._cell_side_curve_hits(bounds)
+        side_midpoints = [
+            (0, round_point((0.5 * (x0 + x1), y0))),
+            (1, round_point((x1, 0.5 * (y0 + y1)))),
+            (2, round_point((0.5 * (x0 + x1), y1))),
+            (3, round_point((x0, 0.5 * (y0 + y1)))),
+        ]
+        return {point for side, point in side_midpoints if side not in side_hits}
+
+    def _pull_sharp_cell_side_midpoints(
+        self,
+        tree: Quadtree,
+        moved_points: Dict[Point, np.ndarray],
+    ) -> None:
+        if not hasattr(self.domain, "vertices_in_box"):
+            return
+        for cell in tree.leaves:
+            vertices = [
+                vertex
+                for vertex in self.domain.vertices_in_box(tree.bounds(cell), self.tol)
+                if self.domain.is_sharp_vertex(*vertex)
+            ]
+            if len(vertices) != 1:
+                continue
+            loop_id, vertex_id = vertices[0]
+            vertex = self.domain.loops[loop_id][vertex_id]
+            x0, _y0, x1, _y1 = tree.bounds(cell)
+            distance = 0.125 * (x1 - x0)
+            for key in self._sharp_side_midpoint_keys(tree, cell):
+                point = np.array(key, dtype=float)
+                if np.linalg.norm(point - vertex) <= self.tol:
+                    continue
+                moved_points[key] = move_toward(point, vertex, distance)
+
+    def _cell_side_curve_hits(self, bounds: Bounds) -> set[int]:
+        if not hasattr(self.domain, "iter_segments"):
+            return set()
+        x0, y0, x1, y1 = bounds
+        sides = [
+            (np.array([x0, y0], dtype=float), np.array([x1, y0], dtype=float)),
+            (np.array([x1, y0], dtype=float), np.array([x1, y1], dtype=float)),
+            (np.array([x1, y1], dtype=float), np.array([x0, y1], dtype=float)),
+            (np.array([x0, y1], dtype=float), np.array([x0, y0], dtype=float)),
+        ]
+        hits: set[int] = set()
+        for side_id, (a, b) in enumerate(sides):
+            side_vec = b - a
+            for _loop_id, _edge_id, c, d in self.domain.iter_segments():
+                hit = segment_parameters(a, side_vec, c, d - c)
+                if hit is None:
+                    continue
+                t, u = hit
+                if -self.tol <= t <= 1.0 + self.tol and -self.tol <= u <= 1.0 + self.tol:
+                    hits.add(side_id)
+                    break
+        return hits
 
     def _interpolate_inserted_point(
         self,
@@ -325,12 +403,13 @@ class AllQuadMesher:
         moved_points: Dict[Point, np.ndarray],
         moved_keys: Dict[Tuple[int, int], Point],
         region: int,
+        relabel_children: bool = False,
     ) -> int:
         poly = clean_polygon(polygon, self.tol)
         if len(poly) < 3:
             return 0
 
-        center = polygon_centroid(poly)
+        center = midpoint_subdivision_center(poly)
         mids = []
         for i, vertex in enumerate(poly):
             nxt = poly[(i + 1) % len(poly)]
@@ -340,15 +419,28 @@ class AllQuadMesher:
             if a_key is not None and b_key is not None:
                 mid_key = round_point((0.5 * (a_key[0] + b_key[0]), 0.5 * (a_key[1] + b_key[1])))
                 midpoint = moved_points.get(mid_key)
-            mids.append(midpoint if midpoint is not None else 0.5 * (vertex + nxt))
+            if midpoint is None:
+                midpoint = 0.5 * (vertex + nxt)
+            mids.append(midpoint)
 
         count = 0
         for i, vertex in enumerate(poly):
             prev_mid = mids[(i - 1) % len(poly)]
             next_mid = mids[i]
-            if mesh.add_quad([vertex, next_mid, center, prev_mid], region=region):
+            quad = [vertex, next_mid, center, prev_mid]
+            quad_region = self._child_quad_region(quad, region) if relabel_children else region
+            if quad_region > 0 and not self.include_exterior:
+                continue
+            if mesh.add_quad(quad, region=quad_region):
                 count += 1
         return count
+
+    def _child_quad_region(self, points: List[np.ndarray], fallback: int) -> int:
+        quad = clean_polygon(points, self.tol)
+        if len(quad) != 4:
+            return fallback
+        center = np.mean(quad, axis=0)
+        return -1 if float(self.domain.sdf(center)) <= 0.0 else 1
 
     def _add_2ref_template(
         self,
@@ -439,6 +531,435 @@ class AllQuadMesher:
             if len(outside) >= 3:
                 pieces.append((outside, 1))
         return pieces
+
+    def _split_cell_polygon(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+        moved_points: Dict[Point, np.ndarray],
+    ) -> List[Tuple[np.ndarray, int]]:
+        if hasattr(self.domain, "vertices_in_box") and hasattr(self.domain, "iter_segments"):
+            vertex_template = self._split_polyline_vertex_template_cell(polygon)
+            if vertex_template:
+                return vertex_template
+            sharp = self._split_polyline_vertex_cell(tree, cell, polygon, moved_points)
+            if sharp:
+                return sharp
+            vertex_chain = self._split_polyline_vertex_chain_cell(tree, cell, polygon)
+            if vertex_chain:
+                return vertex_chain
+            exact_segments = self._split_polyline_segment_cell(tree, cell, polygon)
+            if exact_segments:
+                return exact_segments
+            single = self._split_polyline_single_segment_cell(tree, cell, polygon)
+            if single:
+                return single
+        return self._split_polygon(polygon)
+
+    def _split_polyline_segment_cell(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+    ) -> List[Tuple[np.ndarray, int]]:
+        segments = self._polyline_segments_in_polygon(polygon)
+        if not segments:
+            return []
+
+        pieces = [polygon]
+        for loop_id, edge_id in segments:
+            loop = self.domain.loops[loop_id]
+            a = loop[edge_id]
+            b = loop[(edge_id + 1) % len(loop)]
+            next_pieces: List[np.ndarray] = []
+            split_count = 0
+            for piece in pieces:
+                intersections = self._segment_polygon_intersections(piece, a, b)
+                if len(intersections) != 2:
+                    next_pieces.append(piece)
+                    continue
+                first, second = sorted(intersections, key=lambda item: item[1] + item[2])
+                if np.linalg.norm(first[0] - second[0]) <= self.tol:
+                    next_pieces.append(piece)
+                    continue
+                split = [poly for poly in split_polygon_by_chord(piece, first, second, self.tol) if len(poly) >= 3]
+                if len(split) != 2:
+                    next_pieces.append(piece)
+                    continue
+                next_pieces.extend(split)
+                split_count += 1
+            pieces = next_pieces
+            if split_count == 0:
+                continue
+
+        result = self._classify_polyline_pieces(pieces)
+        if len(result) < 2 or len({region for _poly, region in result}) <= 1:
+            return []
+        if not self._midpoint_pieces_are_usable(result):
+            return []
+        return result
+
+    def _split_polyline_single_segment_cell(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+    ) -> List[Tuple[np.ndarray, int]]:
+        segments = self._polyline_segments_in_polygon(polygon)
+        if len(segments) != 1:
+            return []
+        loop_id, edge_id = segments[0]
+        loop = self.domain.loops[loop_id]
+        a = loop[edge_id]
+        b = loop[(edge_id + 1) % len(loop)]
+        intersections = self._segment_polygon_intersections(polygon, a, b)
+        if len(intersections) != 2:
+            return []
+        first, second = sorted(intersections, key=lambda item: item[2] + item[1])
+        if np.linalg.norm(first[0] - second[0]) <= self.tol:
+            return []
+        split = split_polygon_by_chord(polygon, first, second, self.tol)
+        pieces: List[Tuple[np.ndarray, int]] = []
+        for poly in split:
+            if len(poly) < 3:
+                continue
+            region = -1 if float(self.domain.sdf(polygon_centroid(poly))) <= 0.0 else 1
+            if region < 0 or self.include_exterior:
+                pieces.append((poly, region))
+        if len(pieces) < 2:
+            return []
+        return pieces if len({region for _poly, region in pieces}) > 1 else []
+
+    def _split_polyline_vertex_chain_cell(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+    ) -> List[Tuple[np.ndarray, int]]:
+        vertices = self._polyline_vertices_in_polygon(polygon)
+        if len(vertices) != 1:
+            return []
+
+        loop_id, vertex_id = vertices[0]
+        loop = self.domain.loops[loop_id]
+        vertex = loop[vertex_id]
+        previous = loop[(vertex_id - 1) % len(loop)]
+        nxt = loop[(vertex_id + 1) % len(loop)]
+
+        incoming = self._segment_polygon_intersections(polygon, previous, vertex)
+        outgoing = self._segment_polygon_intersections(polygon, vertex, nxt)
+        incoming = [item for item in incoming if np.linalg.norm(item[0] - vertex) > self.tol]
+        outgoing = [item for item in outgoing if np.linalg.norm(item[0] - vertex) > self.tol]
+        if not incoming or not outgoing:
+            return []
+
+        in_hit = min(incoming, key=lambda item: np.linalg.norm(item[0] - vertex))
+        out_hit = min(outgoing, key=lambda item: np.linalg.norm(item[0] - vertex))
+        if np.linalg.norm(in_hit[0] - out_hit[0]) <= self.tol:
+            return []
+
+        pieces = split_polygon_by_chain(polygon, in_hit, [in_hit[0], vertex, out_hit[0]], out_hit, self.tol)
+        result = self._classify_polyline_pieces(pieces)
+        if len(result) < 2 or len({region for _poly, region in result}) <= 1:
+            return []
+        if not self._midpoint_pieces_are_usable(result):
+            return []
+        return result
+
+    def _split_polyline_vertex_cell(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+        moved_points: Dict[Point, np.ndarray],
+    ) -> List[Tuple[np.ndarray, int]]:
+        vertices = self._polyline_vertices_in_polygon(polygon, sharp_only=True)
+        if len(vertices) != 1:
+            return []
+
+        loop_id, vertex_id = vertices[0]
+        loop = self.domain.loops[loop_id]
+        vertex = loop[vertex_id]
+        previous = loop[(vertex_id - 1) % len(loop)]
+        nxt = loop[(vertex_id + 1) % len(loop)]
+
+        incoming = self._segment_polygon_intersections(polygon, previous, vertex)
+        outgoing = self._segment_polygon_intersections(polygon, vertex, nxt)
+        incoming = [item for item in incoming if np.linalg.norm(item[0] - vertex) > self.tol]
+        outgoing = [item for item in outgoing if np.linalg.norm(item[0] - vertex) > self.tol]
+        if not incoming or not outgoing:
+            return []
+
+        in_hit = min(incoming, key=lambda item: np.linalg.norm(item[0] - vertex))
+        out_hit = min(outgoing, key=lambda item: np.linalg.norm(item[0] - vertex))
+        if np.linalg.norm(in_hit[0] - out_hit[0]) <= self.tol:
+            return []
+
+        parent_regions = self._sharp_parent_regions(polygon, vertex, in_hit, out_hit)
+        extra_points = self._sharp_spoke_points(tree, cell, polygon, moved_points, vertex, in_hit[0], out_hit[0])
+        polygons = split_polygon_by_spokes(
+            polygon,
+            vertex,
+            [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])] + extra_points,
+            self.tol,
+        )
+        pieces: List[Tuple[np.ndarray, int]] = []
+        for poly in polygons:
+            if len(poly) < 3:
+                continue
+            region = self._sharp_piece_region(poly, parent_regions)
+            if region < 0 or self.include_exterior:
+                pieces.append((poly, region))
+        if len(pieces) < 2:
+            return []
+        regions = {region for _poly, region in pieces}
+        if len(regions) <= 1 or not self._midpoint_pieces_are_usable(pieces, require_region_consistency=True):
+            return []
+        return pieces
+
+    def _split_polyline_vertex_template_cell(
+        self,
+        polygon: np.ndarray,
+    ) -> List[Tuple[np.ndarray, int]]:
+        vertices = self._polyline_vertices_in_polygon(polygon)
+        if len(vertices) != 1:
+            return []
+
+        loop_id, vertex_id = vertices[0]
+        loop = self.domain.loops[loop_id]
+        vertex = loop[vertex_id]
+        previous = loop[(vertex_id - 1) % len(loop)]
+        nxt = loop[(vertex_id + 1) % len(loop)]
+
+        incoming = self._segment_polygon_intersections(polygon, previous, vertex)
+        outgoing = self._segment_polygon_intersections(polygon, vertex, nxt)
+        incoming = [item for item in incoming if np.linalg.norm(item[0] - vertex) > self.tol]
+        outgoing = [item for item in outgoing if np.linalg.norm(item[0] - vertex) > self.tol]
+        if not incoming or not outgoing:
+            return []
+
+        in_hit = min(incoming, key=lambda item: np.linalg.norm(item[0] - vertex))
+        out_hit = min(outgoing, key=lambda item: np.linalg.norm(item[0] - vertex))
+        if np.linalg.norm(in_hit[0] - out_hit[0]) <= self.tol:
+            return []
+
+        parent_regions = self._sharp_parent_regions(polygon, vertex, in_hit, out_hit)
+        if len({region for _parent, region in parent_regions}) <= 1:
+            return []
+
+        base_hits = [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])]
+        candidates = self._vertex_spoke_candidates(polygon, vertex, base_hits)
+        best: Tuple[float, float, int, List[Tuple[np.ndarray, int]]] | None = None
+
+        for count in range(0, min(2, len(candidates)) + 1):
+            for extra in combinations(candidates, count):
+                if len({edge_id for _point, edge_id, _u in extra}) != len(extra):
+                    continue
+                polygons = split_polygon_by_spokes(polygon, vertex, base_hits + list(extra), self.tol)
+                pieces: List[Tuple[np.ndarray, int]] = []
+                for poly in polygons:
+                    if len(poly) < 3:
+                        continue
+                    region = self._sharp_piece_region(poly, parent_regions)
+                    if region < 0 or self.include_exterior:
+                        pieces.append((poly, region))
+                if len(pieces) < 2 or len({region for _poly, region in pieces}) <= 1:
+                    continue
+                bounds = self._midpoint_piece_angle_bounds(pieces)
+                if bounds is None:
+                    continue
+                min_angle, max_angle = bounds
+                if min_angle < 15.0 or max_angle > 175.0:
+                    continue
+                score = (min_angle, -max_angle, -count)
+                if best is None or score > (best[0], best[1], best[2]):
+                    best = (min_angle, -max_angle, -count, pieces)
+
+        return [] if best is None else best[3]
+
+    def _vertex_spoke_candidates(
+        self,
+        polygon: np.ndarray,
+        vertex: np.ndarray,
+        base_hits: List[Tuple[np.ndarray, int, float]],
+    ) -> List[Tuple[np.ndarray, int, float]]:
+        fractions = (0.05, 0.10, 0.30, 0.45, 0.50, 0.70, 0.75, 0.90)
+        candidates: List[Tuple[np.ndarray, int, float]] = []
+        base_points = [point for point, _edge_id, _u in base_hits]
+        for edge_id, a in enumerate(polygon):
+            b = polygon[(edge_id + 1) % len(polygon)]
+            for u in fractions:
+                point = a + u * (b - a)
+                if np.linalg.norm(point - vertex) <= self.tol:
+                    continue
+                if any(np.linalg.norm(point - existing) <= self.tol for existing in base_points):
+                    continue
+                candidates.append((point, edge_id, u))
+        return candidates
+
+    def _polyline_vertices_in_polygon(
+        self,
+        polygon: np.ndarray,
+        sharp_only: bool = False,
+    ) -> List[Tuple[int, int]]:
+        if not hasattr(self.domain, "loops"):
+            return []
+        xmin = float(np.min(polygon[:, 0])) - self.tol
+        xmax = float(np.max(polygon[:, 0])) + self.tol
+        ymin = float(np.min(polygon[:, 1])) - self.tol
+        ymax = float(np.max(polygon[:, 1])) + self.tol
+        vertices: List[Tuple[int, int]] = []
+        for loop_id, loop in enumerate(self.domain.loops):
+            for vertex_id, point in enumerate(loop):
+                if not (xmin <= point[0] <= xmax and ymin <= point[1] <= ymax):
+                    continue
+                if sharp_only and not self.domain.is_sharp_vertex(loop_id, vertex_id):
+                    continue
+                if point_in_polygon(point, polygon, self.tol):
+                    vertices.append((loop_id, vertex_id))
+        return vertices
+
+    def _polyline_segments_in_polygon(self, polygon: np.ndarray) -> List[Tuple[int, int]]:
+        if not hasattr(self.domain, "iter_segments"):
+            return []
+        segments: List[Tuple[int, int]] = []
+        for loop_id, edge_id, a, b in self.domain.iter_segments():
+            if point_in_polygon(a, polygon, self.tol) or point_in_polygon(b, polygon, self.tol):
+                segments.append((loop_id, edge_id))
+                continue
+            if self._segment_polygon_intersections(polygon, a, b):
+                segments.append((loop_id, edge_id))
+        return segments
+
+    def _classify_polyline_pieces(self, pieces: List[np.ndarray]) -> List[Tuple[np.ndarray, int]]:
+        result: List[Tuple[np.ndarray, int]] = []
+        for poly in pieces:
+            if len(poly) < 3:
+                continue
+            region = -1 if float(self.domain.sdf(polygon_centroid(poly))) <= 0.0 else 1
+            if region < 0 or self.include_exterior:
+                result.append((poly, region))
+        return result
+
+    def _sharp_parent_regions(
+        self,
+        polygon: np.ndarray,
+        vertex: np.ndarray,
+        in_hit: Tuple[np.ndarray, int, float],
+        out_hit: Tuple[np.ndarray, int, float],
+    ) -> List[Tuple[np.ndarray, int]]:
+        parents = split_polygon_by_chain(polygon, in_hit, [in_hit[0], vertex, out_hit[0]], out_hit, self.tol)
+        regions: List[Tuple[np.ndarray, int]] = []
+        for parent in parents:
+            if len(parent) < 3:
+                continue
+            region = -1 if float(self.domain.sdf(polygon_centroid(parent))) <= 0.0 else 1
+            regions.append((parent, region))
+        return regions
+
+    def _sharp_piece_region(self, polygon: np.ndarray, parent_regions: List[Tuple[np.ndarray, int]]) -> int:
+        center = polygon_centroid(polygon)
+        for parent, region in parent_regions:
+            if point_in_polygon(center, parent, self.tol):
+                return region
+        return -1 if float(self.domain.sdf(center)) <= 0.0 else 1
+
+    def _midpoint_pieces_are_usable(
+        self,
+        pieces: List[Tuple[np.ndarray, int]],
+        require_region_consistency: bool = False,
+    ) -> bool:
+        bounds = self._midpoint_piece_angle_bounds(pieces, require_region_consistency=require_region_consistency)
+        if bounds is None:
+            return False
+        min_angle, max_angle = bounds
+        return min_angle >= 15.0 and max_angle <= 175.0
+
+    def _midpoint_piece_angle_bounds(
+        self,
+        pieces: List[Tuple[np.ndarray, int]],
+        require_region_consistency: bool = False,
+    ) -> Tuple[float, float] | None:
+        min_angles: List[float] = []
+        max_angles: List[float] = []
+        for polygon, _region in pieces:
+            poly = clean_polygon(polygon, self.tol)
+            if len(poly) < 3:
+                return None
+            center = midpoint_subdivision_center(poly)
+            mids = 0.5 * (poly + np.roll(poly, -1, axis=0))
+            for i, vertex in enumerate(poly):
+                quad = clean_polygon([vertex, mids[i], center, mids[(i - 1) % len(poly)]], self.tol)
+                if len(quad) != 4:
+                    return None
+                angles = quad_angles(quad, self.tol)
+                if not angles:
+                    return None
+                min_angles.append(min(angles))
+                max_angles.append(max(angles))
+                if require_region_consistency:
+                    quad_center = np.mean(quad, axis=0)
+                    quad_region = -1 if float(self.domain.sdf(quad_center)) <= 0.0 else 1
+                    if quad_region != _region:
+                        return None
+        if not min_angles:
+            return None
+        return min(min_angles), max(max_angles)
+
+    def _sharp_spoke_points(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+        moved_points: Dict[Point, np.ndarray],
+        vertex: np.ndarray,
+        in_hit: np.ndarray,
+        out_hit: np.ndarray,
+    ) -> List[Tuple[np.ndarray, int, float]]:
+        hits = []
+        x0, y0, x1, y1 = tree.bounds(cell)
+        side_midpoints = [
+            (0, round_point((0.5 * (x0 + x1), y0))),
+            (1, round_point((x1, 0.5 * (y0 + y1)))),
+            (2, round_point((0.5 * (x0 + x1), y1))),
+            (3, round_point((x0, 0.5 * (y0 + y1)))),
+        ]
+        side_hits = self._cell_side_curve_hits((x0, y0, x1, y1))
+        for side_id, key in side_midpoints:
+            if side_id in side_hits or key not in moved_points:
+                continue
+            point = moved_points[key]
+            if np.linalg.norm(point - in_hit) <= self.tol or np.linalg.norm(point - out_hit) <= self.tol:
+                continue
+            nearest = closest_polygon_edge(polygon, point, self.tol)
+            if nearest is None:
+                continue
+            _nearest_point, edge_id, u = nearest
+            hits.append((point, edge_id, u))
+        return hits
+
+    def _segment_polygon_intersections(
+        self,
+        polygon: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+    ) -> List[Tuple[np.ndarray, int, float]]:
+        hits: List[Tuple[np.ndarray, int, float]] = []
+        r = b - a
+        n = len(polygon)
+        for edge_id in range(n):
+            c = polygon[edge_id]
+            d = polygon[(edge_id + 1) % n]
+            hit = segment_parameters(a, r, c, d - c)
+            if hit is None:
+                continue
+            t, u = hit
+            if -self.tol <= t <= 1.0 + self.tol and -self.tol <= u <= 1.0 + self.tol:
+                point = a + np.clip(t, 0.0, 1.0) * r
+                if not any(np.linalg.norm(point - existing[0]) <= self.tol for existing in hits):
+                    hits.append((point, edge_id, float(np.clip(u, 0.0, 1.0))))
+        return hits
 
     def _clip_polygon(self, polygon: np.ndarray, keep_inside: bool) -> np.ndarray:
         vals = np.asarray(self.domain.sdf(polygon), dtype=float)
@@ -534,6 +1055,216 @@ def lerp(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
     return (1.0 - t) * a + t * b
 
 
+def move_toward(point: np.ndarray, target: np.ndarray, distance: float) -> np.ndarray:
+    direction = target - point
+    length = float(np.linalg.norm(direction))
+    if length <= 1.0e-14:
+        return point
+    return point + direction / length * min(distance, 0.5 * length)
+
+
 def mesh_key(point: np.ndarray, tol: float) -> Tuple[int, int]:
     p = np.asarray(point, dtype=float)
     return (int(round(p[0] / tol)), int(round(p[1] / tol)))
+
+
+def quad_angles(quad: np.ndarray, tol: float) -> List[float]:
+    angles = []
+    for i in range(4):
+        a = quad[(i - 1) % 4] - quad[i]
+        b = quad[(i + 1) % 4] - quad[i]
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom <= tol:
+            return []
+        cosine = float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
+        angles.append(float(np.degrees(np.arccos(cosine))))
+    return angles
+
+
+def point_in_polygon(point: np.ndarray, polygon: np.ndarray, tol: float) -> bool:
+    p = np.asarray(point, dtype=float)
+    n = len(polygon)
+    inside = False
+    for i in range(n):
+        a = polygon[i]
+        b = polygon[(i + 1) % n]
+        if point_on_segment(p, a, b, tol):
+            return True
+        if ((a[1] > p[1]) != (b[1] > p[1])) and (
+            p[0] < (b[0] - a[0]) * (p[1] - a[1]) / ((b[1] - a[1]) if b[1] != a[1] else 1.0e-300) + a[0]
+        ):
+            inside = not inside
+    return inside
+
+
+def point_on_segment(point: np.ndarray, a: np.ndarray, b: np.ndarray, tol: float) -> bool:
+    ab = b - a
+    ap = point - a
+    if abs(ab[0] * ap[1] - ab[1] * ap[0]) > tol * max(np.linalg.norm(ab), 1.0):
+        return False
+    return (
+        min(a[0], b[0]) - tol <= point[0] <= max(a[0], b[0]) + tol
+        and min(a[1], b[1]) - tol <= point[1] <= max(a[1], b[1]) + tol
+    )
+
+
+def closest_polygon_edge(
+    polygon: np.ndarray,
+    point: np.ndarray,
+    tol: float,
+) -> Tuple[np.ndarray, int, float] | None:
+    best = None
+    best_distance = float("inf")
+    for edge_id, a in enumerate(polygon):
+        b = polygon[(edge_id + 1) % len(polygon)]
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom <= tol * tol:
+            continue
+        u = float(np.clip(np.dot(point - a, ab) / denom, 0.0, 1.0))
+        nearest = a + u * ab
+        distance = float(np.linalg.norm(point - nearest))
+        if distance < best_distance:
+            best = (nearest, edge_id, u)
+            best_distance = distance
+    return best
+
+
+def split_polygon_by_spokes(
+    polygon: np.ndarray,
+    vertex: np.ndarray,
+    boundary_points: List[Tuple[np.ndarray, int, float]],
+    tol: float,
+) -> List[np.ndarray]:
+    boundary_points = dedupe_boundary_points(boundary_points, tol)
+    if len(boundary_points) < 2:
+        return []
+
+    augmented = insert_edge_points(polygon, boundary_points, tol)
+    indexed = []
+    for point, _edge_id, _u in boundary_points:
+        idx = find_point_index(augmented, point, tol)
+        if idx is not None:
+            indexed.append((idx, point))
+    indexed = dedupe_indexed_points(sorted(indexed, key=lambda item: item[0]), tol)
+    if len(indexed) < 2:
+        return []
+
+    polygons = []
+    for (start_idx, start_point), (end_idx, end_point) in zip(indexed, indexed[1:] + indexed[:1]):
+        path = polygon_path(augmented, start_idx, end_idx)
+        poly = clean_polygon(path + [vertex], tol)
+        if len(poly) >= 3:
+            polygons.append(poly)
+    return polygons
+
+
+def split_polygon_by_chord(
+    polygon: np.ndarray,
+    start: Tuple[np.ndarray, int, float],
+    end: Tuple[np.ndarray, int, float],
+    tol: float,
+) -> List[np.ndarray]:
+    augmented = insert_edge_points(polygon, [start, end], tol)
+    start_idx = find_point_index(augmented, start[0], tol)
+    end_idx = find_point_index(augmented, end[0], tol)
+    if start_idx is None or end_idx is None or start_idx == end_idx:
+        return []
+    return [
+        clean_polygon(polygon_path(augmented, start_idx, end_idx), tol),
+        clean_polygon(polygon_path(augmented, end_idx, start_idx), tol),
+    ]
+
+
+def split_polygon_by_chain(
+    polygon: np.ndarray,
+    start: Tuple[np.ndarray, int, float],
+    chain: List[np.ndarray],
+    end: Tuple[np.ndarray, int, float],
+    tol: float,
+) -> List[np.ndarray]:
+    augmented = insert_edge_points(polygon, [start, end], tol)
+    start_idx = find_point_index(augmented, start[0], tol)
+    end_idx = find_point_index(augmented, end[0], tol)
+    if start_idx is None or end_idx is None or start_idx == end_idx:
+        return []
+
+    path_a = polygon_path(augmented, start_idx, end_idx)
+    path_b = polygon_path(augmented, end_idx, start_idx)
+    chain_forward = dedupe_points(chain, tol)
+    chain_backward = dedupe_points(list(reversed(chain)), tol)
+    return [
+        clean_polygon(path_a + chain_backward[1:-1], tol),
+        clean_polygon(path_b + chain_forward[1:-1], tol),
+    ]
+
+
+def insert_edge_points(
+    polygon: np.ndarray,
+    insertions: List[Tuple[np.ndarray, int, float]],
+    tol: float,
+) -> List[np.ndarray]:
+    by_edge: Dict[int, List[Tuple[np.ndarray, float]]] = {}
+    for point, edge_id, u in insertions:
+        by_edge.setdefault(edge_id, []).append((point, u))
+
+    augmented: List[np.ndarray] = []
+    for edge_id, point in enumerate(polygon):
+        augmented.append(point)
+        edge_insertions = sorted(by_edge.get(edge_id, []), key=lambda item: item[1])
+        for inserted, _u in edge_insertions:
+            if np.linalg.norm(inserted - point) <= tol:
+                continue
+            nxt = polygon[(edge_id + 1) % len(polygon)]
+            if np.linalg.norm(inserted - nxt) <= tol:
+                continue
+            if not augmented or np.linalg.norm(inserted - augmented[-1]) > tol:
+                augmented.append(inserted)
+    return dedupe_points(augmented, tol)
+
+
+def dedupe_boundary_points(
+    points: List[Tuple[np.ndarray, int, float]],
+    tol: float,
+) -> List[Tuple[np.ndarray, int, float]]:
+    deduped: List[Tuple[np.ndarray, int, float]] = []
+    for point, edge_id, u in sorted(points, key=lambda item: (item[1], item[2])):
+        if any(np.linalg.norm(point - existing[0]) <= tol for existing in deduped):
+            continue
+        deduped.append((point, edge_id, u))
+    return deduped
+
+
+def dedupe_indexed_points(points: List[Tuple[int, np.ndarray]], tol: float) -> List[Tuple[int, np.ndarray]]:
+    deduped: List[Tuple[int, np.ndarray]] = []
+    for idx, point in points:
+        if any(idx == existing_idx or np.linalg.norm(point - existing_point) <= tol for existing_idx, existing_point in deduped):
+            continue
+        deduped.append((idx, point))
+    return deduped
+
+
+def find_point_index(points: List[np.ndarray], target: np.ndarray, tol: float) -> int | None:
+    for idx, point in enumerate(points):
+        if np.linalg.norm(point - target) <= tol:
+            return idx
+    return None
+
+
+def polygon_path(points: List[np.ndarray], start: int, end: int) -> List[np.ndarray]:
+    path = [points[start]]
+    idx = start
+    while idx != end:
+        idx = (idx + 1) % len(points)
+        path.append(points[idx])
+    return path
+
+
+def dedupe_points(points: List[np.ndarray], tol: float) -> List[np.ndarray]:
+    deduped: List[np.ndarray] = []
+    for point in points:
+        if not deduped or np.linalg.norm(point - deduped[-1]) > tol:
+            deduped.append(point)
+    if len(deduped) > 1 and np.linalg.norm(deduped[0] - deduped[-1]) <= tol:
+        deduped.pop()
+    return deduped

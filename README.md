@@ -77,22 +77,29 @@ Useful parameters:
 ```powershell
 python -m compileall allquad tools
 python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
-python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 24 --max-angle 156
+python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 15 --max-angle 175
+python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 15 --max-angle 175
+python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 15 --max-angle 175
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
 both interior and exterior elements, has no nonmanifold edges, has no degenerate
 angles outside the configured quality range, and that detected geometry-boundary
-edges are present. The default regression range is `15` to `165` degrees;
-smoother inputs should be checked with tighter limits.
+edges are present and lie on the original discrete polyline boundary to floating
+point tolerance. The default regression range is `15` to `165` degrees; the
+adaptive polyline examples are checked with a wider `15` to `175` guard because
+sharp input vertices are not covered by the paper's smooth-boundary bound.
 
 ## Notes on fidelity
 
 The paper treats input geometry as curves and vertices. This implementation now
 uses piecewise-linear closed loops as the main input, so arbitrary shapes can be
-meshed without writing formulas. Exact sharp-feature templates from Fig. 6 are
-approximated by the same segment intersection and midpoint subdivision pipeline;
-adding vertex-specific templates is the next fidelity step.
+meshed without writing formulas. Cells cut by one or more polyline segments are
+split against the actual input segments instead of an analytic formula. Cells
+containing geometric vertices use a Fig. 6-style spoke template: the original
+polyline vertex is inserted, adjacent curve hits are connected through that
+vertex, and auxiliary edge spokes are selected to keep midpoint-subdivision
+angles away from flat elements.
 
 Adaptive transitions now use the paper's two-refinement (2-ref) idea for
 coarse/fine interfaces. Standard single-midpoint sides use the Fig. 7 templates;

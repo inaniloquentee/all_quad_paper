@@ -54,6 +54,8 @@ class Quadtree:
     def _needs_refinement(self, domain: SDFDomain, cell: Cell, boundary_band: float) -> bool:
         x0, y0, x1, y1 = self.bounds(cell)
         s = x1 - x0
+        if hasattr(domain, "should_refine_cell_for_polyline") and domain.should_refine_cell_for_polyline((x0, y0, x1, y1)):
+            return True
         pts = np.array(
             [
                 [x0, y0],

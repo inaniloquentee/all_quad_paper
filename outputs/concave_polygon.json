@@ -1,42 +1,44 @@
 {
   "quality": {
-    "vertices": 45008.0,
-    "quads": 44592.0,
-    "min_angle": 24.025108713755255,
-    "max_angle": 155.97489128624528,
-    "min_edge_ratio": 0.062499999999998605,
-    "avg_edge_ratio": 0.886057564410326,
-    "min_area": 4.505375544500145e-06,
+    "vertices": 45149.0,
+    "quads": 44690.0,
+    "min_angle": 26.601725058281577,
+    "max_angle": 153.39827494171843,
+    "min_edge_ratio": 0.03241373942714194,
+    "avg_edge_ratio": 0.8848533340945551,
+    "min_area": 8.114516787394166e-07,
     "max_area": 0.01118634031250032
   },
   "quality_by_region": {
     "interior": {
-      "vertices": 23356.0,
-      "quads": 22888.0,
-      "min_angle": 25.81906523067034,
-      "max_angle": 155.97489128624528,
-      "min_edge_ratio": 0.19875039734185593,
-      "avg_edge_ratio": 0.9573609229422306,
-      "min_area": 5.480432010211006e-06,
-      "max_area": 9.356628994450222e-05
+      "vertices": 23430.0,
+      "quads": 22931.0,
+      "min_angle": 26.601725058281886,
+      "max_angle": 153.39827494171843,
+      "min_edge_ratio": 0.03893389566905796,
+      "avg_edge_ratio": 0.9564131340334497,
+      "min_area": 2.668788629034413e-06,
+      "max_area": 0.00010272418012091666
     },
     "exterior": {
-      "vertices": 22584.0,
-      "quads": 21704.0,
-      "min_angle": 24.025108713755255,
-      "max_angle": 154.18093476932947,
-      "min_edge_ratio": 0.062499999999998605,
-      "avg_edge_ratio": 0.810864453920175,
-      "min_area": 4.505375544500145e-06,
+      "vertices": 22679.0,
+      "quads": 21759.0,
+      "min_angle": 26.601725058281577,
+      "max_angle": 153.3982749417181,
+      "min_edge_ratio": 0.03241373942714194,
+      "avg_edge_ratio": 0.8094391251511849,
+      "min_area": 8.114516787394166e-07,
       "max_area": 0.01118634031250032
     }
   },
   "topology": {
-    "edges": 89600.0,
-    "boundary_edges": 832.0,
+    "edges": 89860.0,
+    "boundary_edges": 960.0,
     "nonmanifold_edges": 0.0,
-    "interface_edges": 932.0,
-    "max_interface_midpoint_error": 0.005730724119897525,
-    "avg_interface_midpoint_error": 4.5385904296473234e-05
+    "interface_edges": 960.0,
+    "max_interface_midpoint_error": 2.482534153247273e-16,
+    "avg_interface_midpoint_error": 3.466637795217445e-17,
+    "max_interface_endpoint_error": 2.482534153247273e-16,
+    "avg_interface_endpoint_error": 2.5375301162273186e-17
   }
 }

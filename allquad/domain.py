@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, Iterable, List, Tuple
 
 import numpy as np
 
@@ -171,6 +171,65 @@ class PolylineDomain(SDFDomain):
         if best_t is not None:
             return p + best_t * r
         return super().segment_intersection(a, b, da, db, iterations)
+
+    def iter_segments(self) -> Iterable[Tuple[int, int, np.ndarray, np.ndarray]]:
+        for loop_id, loop in enumerate(self.loops):
+            for edge_id in range(len(loop)):
+                yield loop_id, edge_id, loop[edge_id], loop[(edge_id + 1) % len(loop)]
+
+    def vertices_in_box(self, bounds: Tuple[float, float, float, float], tol: float = 1.0e-12) -> List[Tuple[int, int]]:
+        x0, y0, x1, y1 = bounds
+        vertices: List[Tuple[int, int]] = []
+        for loop_id, loop in enumerate(self.loops):
+            for vertex_id, point in enumerate(loop):
+                if x0 - tol <= point[0] <= x1 + tol and y0 - tol <= point[1] <= y1 + tol:
+                    vertices.append((loop_id, vertex_id))
+        return vertices
+
+    def segments_in_box(self, bounds: Tuple[float, float, float, float], tol: float = 1.0e-12) -> List[Tuple[int, int]]:
+        x0, y0, x1, y1 = bounds
+        hits: List[Tuple[int, int]] = []
+        for loop_id, edge_id, a, b in self.iter_segments():
+            if segment_intersects_box(a, b, x0, y0, x1, y1, tol):
+                hits.append((loop_id, edge_id))
+        return hits
+
+    def should_refine_cell_for_polyline(
+        self,
+        bounds: Tuple[float, float, float, float],
+        tol: float = 1.0e-12,
+    ) -> bool:
+        segments = self.segments_in_box(bounds, tol)
+        if len(segments) <= 1:
+            return False
+
+        vertices = self.vertices_in_box(bounds, tol)
+        if len(segments) == 2 and len(vertices) == 1:
+            loop_id, vertex_id = vertices[0]
+            loop = self.loops[loop_id]
+            incoming = (loop_id, (vertex_id - 1) % len(loop))
+            outgoing = (loop_id, vertex_id)
+            if set(segments) == {incoming, outgoing}:
+                return False
+        return True
+
+    def is_sharp_vertex(
+        self,
+        loop_id: int,
+        vertex_id: int,
+        min_turn_degrees: float = 45.0,
+    ) -> bool:
+        loop = self.loops[loop_id]
+        vertex = loop[vertex_id]
+        previous = loop[(vertex_id - 1) % len(loop)]
+        nxt = loop[(vertex_id + 1) % len(loop)]
+        a = previous - vertex
+        b = nxt - vertex
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom <= 1.0e-14:
+            return False
+        angle = math.degrees(math.acos(float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))))
+        return angle <= 180.0 - min_turn_degrees
 
     def closest_point(self, point: ArrayLike) -> Tuple[np.ndarray, float, Tuple[int, int]]:
         p = np.asarray(point, dtype=float)
@@ -342,6 +401,58 @@ def point_in_loop(point: np.ndarray, loop: np.ndarray) -> bool:
         ):
             inside = not inside
     return inside
+
+
+def segment_intersects_box(
+    a: np.ndarray,
+    b: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    tol: float = 1.0e-12,
+) -> bool:
+    if max(a[0], b[0]) < x0 - tol or min(a[0], b[0]) > x1 + tol:
+        return False
+    if max(a[1], b[1]) < y0 - tol or min(a[1], b[1]) > y1 + tol:
+        return False
+    if point_in_box(a, x0, y0, x1, y1, tol) or point_in_box(b, x0, y0, x1, y1, tol):
+        return True
+
+    corners = (
+        np.array([x0, y0], dtype=float),
+        np.array([x1, y0], dtype=float),
+        np.array([x1, y1], dtype=float),
+        np.array([x0, y1], dtype=float),
+    )
+    r = b - a
+    for c, d in zip(corners, corners[1:] + corners[:1]):
+        hit = segment_parameters(a, r, c, d - c)
+        if hit is None:
+            if abs(cross2(r, c - a)) > tol * max(np.linalg.norm(r), 1.0):
+                continue
+            if intervals_overlap(a[0], b[0], c[0], d[0], tol) and intervals_overlap(a[1], b[1], c[1], d[1], tol):
+                return True
+            continue
+        t, u = hit
+        if -tol <= t <= 1.0 + tol and -tol <= u <= 1.0 + tol:
+            return True
+    return False
+
+
+def point_in_box(
+    point: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    tol: float = 1.0e-12,
+) -> bool:
+    return x0 - tol <= point[0] <= x1 + tol and y0 - tol <= point[1] <= y1 + tol
+
+
+def intervals_overlap(a0: float, a1: float, b0: float, b1: float, tol: float = 1.0e-12) -> bool:
+    return max(min(a0, a1), min(b0, b1)) <= min(max(a0, a1), max(b0, b1)) + tol
 
 
 def segment_parameters(
