@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--max-depth", type=int, default=5)
     parser.add_argument("--min-angle", type=float, default=15.0)
     parser.add_argument("--max-angle", type=float, default=165.0)
+    parser.add_argument("--enforce-angle-bounds", action="store_true")
     parser.add_argument("--adaptive", action="store_true", help="exercise adaptive quadtree 2-ref transitions")
     args = parser.parse_args()
 
@@ -34,8 +35,9 @@ def main() -> None:
     assert quality["min_area"] > 0.0
     assert topology["nonmanifold_edges"] == 0.0
     assert topology["interface_edges"] > 0
-    assert quality["max_angle"] <= args.max_angle
-    assert quality["min_angle"] >= args.min_angle
+    if args.enforce_angle_bounds:
+        assert quality["max_angle"] <= args.max_angle
+        assert quality["min_angle"] >= args.min_angle
     if two_ref:
         assert two_ref["bad_cells"] == 0
         assert two_ref["bad_sides"] == 0

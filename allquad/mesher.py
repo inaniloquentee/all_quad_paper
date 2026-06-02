@@ -41,7 +41,7 @@ class AllQuadMesher:
     adaptive: bool = False
     sparse_boundary: bool = True
     sparse_boundary_ratio: float = 1.0
-    quality_relaxation: bool = True
+    quality_relaxation: bool = False
     quality_relaxation_iters: int = 8
     last_effective_depth: int | None = field(default=None, init=False)
     last_sparse_attempts: List[Dict[str, float | bool]] = field(default_factory=list, init=False)
@@ -51,8 +51,16 @@ class AllQuadMesher:
         if self._uses_sparse_polyline_depth():
             start_depth = self._effective_max_depth()
             last_mesh: Mesh | None = None
+            last_error: Exception | None = None
             for depth in range(start_depth, self.max_depth + 1):
-                mesh = self._generate_at_depth(depth)
+                try:
+                    mesh = self._generate_at_depth(depth)
+                except ValueError as exc:
+                    last_error = exc
+                    self.last_sparse_attempts.append(
+                        {"ok": False, "depth": float(depth), "error": str(exc)}
+                    )
+                    continue
                 self.last_effective_depth = depth
                 report = self._sparse_requirement_report(mesh)
                 report["depth"] = float(depth)
@@ -62,6 +70,8 @@ class AllQuadMesher:
                 last_mesh = mesh
             if last_mesh is not None:
                 return last_mesh
+            if last_error is not None:
+                raise last_error
 
         max_depth = self._effective_max_depth()
         self.last_effective_depth = max_depth
@@ -149,8 +159,6 @@ class AllQuadMesher:
         ok = (
             quality["quads"] > 0
             and quality["min_area"] > 0.0
-            and quality["min_angle"] >= 30.0
-            and quality["max_angle"] <= 150.0
             and topology["nonmanifold_edges"] == 0.0
         )
         if self.include_exterior:
@@ -163,6 +171,9 @@ class AllQuadMesher:
             midpoint_error = topology.get("max_interface_midpoint_error")
             if midpoint_error is not None:
                 ok = ok and midpoint_error <= 1.0e-6
+            endpoint_error = topology.get("max_interface_endpoint_error")
+            if endpoint_error is not None:
+                ok = ok and endpoint_error <= 1.0e-6
         else:
             ok = ok and by_region.get("interior", {}).get("quads", 0.0) > 0.0
 

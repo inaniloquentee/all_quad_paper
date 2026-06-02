@@ -35,7 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-quality-relaxation",
         action="store_true",
-        help="disable local non-boundary vertex relaxation for stricter angle quality",
+        help="compatibility option; local relaxation is disabled by default",
+    )
+    parser.add_argument(
+        "--quality-relaxation",
+        action="store_true",
+        help="enable optional local non-boundary vertex relaxation for stricter angle quality",
     )
     parser.add_argument("--no-plot", action="store_true", help="skip PNG plot generation")
     return parser
@@ -55,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
         adaptive=args.adaptive,
         sparse_boundary=not args.dense_boundary,
         sparse_boundary_ratio=args.sparse_boundary_ratio,
-        quality_relaxation=not args.no_quality_relaxation,
+        quality_relaxation=args.quality_relaxation and not args.no_quality_relaxation,
     )
     mesh = mesher.generate()
     prefix = Path(args.out)

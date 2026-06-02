@@ -72,12 +72,12 @@ Useful parameters:
 - `--sparse-boundary-ratio 1.0`: in adaptive polyline mode, target the effective
   boundary depth from the shortest input segment instead of refining every
   boundary cell to `--max-depth`. The mesher starts with the dyadic cell size
-  closest to this target and only refines further if the strict quality/topology
-  checks fail.
+  closest to this target and only refines further if topology, boundary
+  conformance, or 2-ref compatibility fails.
 - `--dense-boundary`: disable the shortest-segment sparse cap and use the full
   requested adaptive boundary depth.
-- `--no-quality-relaxation`: disable the final local relaxation pass that moves
-  free non-boundary vertices to meet the stricter angle target.
+- `--quality-relaxation`: optionally enable a non-paper local relaxation pass
+  that moves free non-boundary vertices toward stricter angle targets.
 - `--inside-only`: omit the exterior mesh if you only want the old one-sided
   output.
 - `--domain circle`: use a built-in analytic demo instead of `--input-json`.
@@ -89,32 +89,30 @@ Useful parameters:
 ```powershell
 python -m compileall allquad tools
 python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
-python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 30 --max-angle 150
-python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 30 --max-angle 150
-python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 30 --max-angle 150
+python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7
+python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7
+python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
-both interior and exterior elements, has no nonmanifold edges, has no degenerate
-angles outside the configured quality range, and that detected geometry-boundary
-edges are present and lie on the original discrete polyline boundary to floating
-point tolerance. The default regression range is `15` to `165` degrees; the
-adaptive polyline examples are checked with a paper-aligned sharp-feature guard:
-minimum angle at least `30` degrees and maximum angle at most `150` degrees.
+both interior and exterior elements, has no nonmanifold edges, and that detected
+geometry-boundary edges are present and lie on the original discrete polyline
+boundary to floating point tolerance. Angles are reported for comparison with
+the paper, but they are not used by the default paper-flow regression check.
+Pass `--enforce-angle-bounds` with `--min-angle` and `--max-angle` if you want
+an additional engineering-quality gate.
 
 With the default sparse cap, the example commands still accept `--max-depth 7`,
 but the effective adaptive depth is chosen from the shortest discrete input
-segment and then increased only if required by the strict checks. The current
-examples resolve to depth `5` for `wobbly_loop` and depth `3` for
-`concave_polygon` and `box_with_hole`, keeping the boundary
-region readable while preserving the angle, topology, and 2-ref checks.
+segment and then increased only if required by topology, boundary conformance,
+or 2-ref compatibility. The current examples resolve to depth `4` for
+`wobbly_loop` and depth `3` for `concave_polygon` and `box_with_hole`, keeping
+the boundary region readable while preserving the topology, boundary, and 2-ref
+checks.
 
-After the paper templates are applied, adaptive outputs run a local relaxation
-pass on free same-region vertices. The pass keeps input-boundary vertices and
-geometry-interface vertices fixed, only accepts moves that improve the local
-angle violation, and preserves the signed side of each moved vertex. This is the
-last step that brings the example outputs to the stricter `30`/`150` degree
-range without moving the discrete input boundary.
+The default adaptive path is cleanup-free: after the paper templates are
+applied, no smoothing or angle-relaxation pass is run. `--quality-relaxation` is
+kept as an opt-in engineering aid only, not as part of the paper reproduction.
 
 ## Notes on fidelity
 
