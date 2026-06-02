@@ -48,7 +48,7 @@ class Quadtree:
                 leaves.add(cell)
 
         tree.leaves = leaves
-        tree.balance(max_depth=max_depth)
+        tree.refine_until_conforming(domain, boundary_band, max_depth)
         return tree
 
     def _needs_refinement(self, domain: SDFDomain, cell: Cell, boundary_band: float) -> bool:
@@ -97,6 +97,29 @@ class Quadtree:
             self.leaves.difference_update(refine)
             for cell in refine:
                 self.leaves.update(children(cell))
+
+    def refine_until_conforming(
+        self,
+        domain: SDFDomain,
+        boundary_band: float,
+        max_depth: int,
+    ) -> None:
+        """Refine and strongly balance until every leaf satisfies the paper's preconditions."""
+
+        while True:
+            refine = {
+                cell
+                for cell in self.leaves
+                if cell.level < max_depth and self._needs_refinement(domain, cell, boundary_band)
+            }
+            if refine:
+                self.leaves.difference_update(refine)
+                for cell in refine:
+                    self.leaves.update(children(cell))
+            before = set(self.leaves)
+            self.balance(max_depth=max_depth)
+            if not refine and before == self.leaves:
+                return
 
     def bounds(self, cell: Cell) -> Tuple[float, float, float, float]:
         h = self.size / (2**cell.level)

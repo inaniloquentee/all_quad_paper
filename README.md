@@ -13,9 +13,13 @@ Implemented pipeline:
 3. Split cells cut by the geometry with closed polyline boundary intersections and
    keep both interior and exterior polygons.
 4. Convert cut polygons and deformed polygons into quads with midpoint
-   subdivision. Empty adaptive cells use two-refinement transition templates,
-   including a structured closure for propagated hanging-node chains.
-5. Export OBJ, legacy VTK, PNG preview, region labels, and mesh quality metrics.
+   subdivision. Cells containing input vertices use the Fig. 6 vertex treatment:
+   preserve the original polyline vertex, add side midpoints on non-intersected
+   square sides, pull those points by `s / 8`, and choose vertex spokes using the
+   same midpoint positions that will be written to the final mesh.
+5. Empty adaptive cells use Fig. 7 two-refinement transition templates with
+   checkerboard corner marking to remove hanging nodes.
+6. Export OBJ, legacy VTK, PNG preview, region labels, and mesh quality metrics.
 
 The code is self-contained and uses only `numpy` and `matplotlib` at runtime.
 The primary input is a discrete closed polyline JSON file, matching the paper's
@@ -25,10 +29,9 @@ quick demos.
 ## Run
 
 ```powershell
-python -m allquad --input-json examples/wobbly_loop.json --max-depth 7 --out outputs/wobbly_loop
-python -m allquad --input-json examples/concave_polygon.json --max-depth 7 --out outputs/concave_polygon
-python -m allquad --input-json examples/box_with_hole.json --max-depth 7 --out outputs/box_with_hole
-python -m allquad --input-json examples/concave_polygon.json --adaptive --max-depth 7 --out outputs/concave_polygon_adaptive
+python -m allquad --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --out outputs/wobbly_loop
+python -m allquad --input-json examples/concave_polygon.json --adaptive --max-depth 7 --out outputs/concave_polygon
+python -m allquad --input-json examples/box_with_hole.json --adaptive --max-depth 7 --out outputs/box_with_hole
 ```
 
 JSON formats:
@@ -77,9 +80,9 @@ Useful parameters:
 ```powershell
 python -m compileall allquad tools
 python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
-python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 15 --max-angle 175
-python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 15 --max-angle 175
-python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 15 --max-angle 175
+python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
+python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
+python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
@@ -87,8 +90,8 @@ both interior and exterior elements, has no nonmanifold edges, has no degenerate
 angles outside the configured quality range, and that detected geometry-boundary
 edges are present and lie on the original discrete polyline boundary to floating
 point tolerance. The default regression range is `15` to `165` degrees; the
-adaptive polyline examples are checked with a wider `15` to `175` guard because
-sharp input vertices are not covered by the paper's smooth-boundary bound.
+adaptive polyline examples are checked with a paper-aligned sharp-feature guard:
+minimum angle at least `24` degrees and maximum angle at most `170` degrees.
 
 ## Notes on fidelity
 
@@ -96,13 +99,14 @@ The paper treats input geometry as curves and vertices. This implementation now
 uses piecewise-linear closed loops as the main input, so arbitrary shapes can be
 meshed without writing formulas. Cells cut by one or more polyline segments are
 split against the actual input segments instead of an analytic formula. Cells
-containing geometric vertices use a Fig. 6-style spoke template: the original
+containing geometric vertices use the Fig. 6 vertex template: the original
 polyline vertex is inserted, adjacent curve hits are connected through that
-vertex, and auxiliary edge spokes are selected to keep midpoint-subdivision
-angles away from flat elements.
+vertex, non-intersected side midpoints are pulled toward the vertex by `s / 8`,
+and auxiliary edge spokes are selected using the actual midpoint-subdivision
+points used by the final mesh. This keeps the interior/exterior interface on the
+original discrete boundary instead of on analytic SDF chords.
 
-Adaptive transitions now use the paper's two-refinement (2-ref) idea for
-coarse/fine interfaces. Standard single-midpoint sides use the Fig. 7 templates;
-when midpoint subdivision near geometry propagates longer hanging-node chains,
-the implementation closes them with a structured 2-ref-compatible template so
-the mesh remains all-quad and avoids near-180 degree transition elements.
+Adaptive transitions now use the paper's two-refinement (2-ref) templates for
+coarse/fine interfaces. The quadtree is refined until every empty adaptive cell
+has at most one hanging node on each side, then the Fig. 7 templates are applied
+with checkerboard corner marking.

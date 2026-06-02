@@ -8,11 +8,23 @@ import numpy as np
 
 from .domain import SDFDomain, segment_parameters
 from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_centroid
-from .quadtree import Cell, Quadtree, round_point
+from .quadtree import Cell, Quadtree, children, round_point
 
 
 Point = Tuple[float, float]
 Bounds = Tuple[float, float, float, float]
+SIDE_CORNERS = (
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+)
+CORNER_SIDES = (
+    (3, 0),
+    (0, 1),
+    (1, 2),
+    (2, 3),
+)
 
 
 @dataclass
@@ -35,13 +47,12 @@ class AllQuadMesher:
             max_depth=self.max_depth,
             boundary_band=self.boundary_band,
         )
+        if self.adaptive:
+            self._refine_tree_for_2ref(tree)
         base_points = tree.collect_corners()
         grid_points = base_points
         if self.adaptive:
             grid_points = self._augment_points_for_2ref(tree, base_points)
-        else:
-            incident_sizes = tree.incident_min_sizes()
-        base_x_index, base_y_index = build_side_indices(base_points)
         base_incident_sizes = tree.incident_min_sizes()
         moved_base_points = {
             p: self.domain.repel(
@@ -55,20 +66,22 @@ class AllQuadMesher:
             p: (
                 moved_base_points[p]
                 if p in moved_base_points
-                else self._interpolate_inserted_point(p, moved_base_points, base_x_index, base_y_index)
+                else self._interpolate_inserted_point(
+                    p,
+                    moved_base_points,
+                    *build_side_indices(base_points),
+                )
             )
             for p in grid_points
         }
         if self.adaptive:
-            self._pull_sharp_cell_side_midpoints(tree, moved_points)
+            self._pull_vertex_cell_side_midpoints(tree, moved_points)
         moved_keys = {mesh_key(point, self.tol): key for key, point in moved_points.items()}
         x_index, y_index = build_side_indices(grid_points)
 
         mesh = Mesh(tol=self.tol)
         for cell in sorted(tree.leaves):
-            active_cut_x_index = base_x_index if self.adaptive else x_index
-            active_cut_y_index = base_y_index if self.adaptive else y_index
-            poly = self._cell_polygon(tree, cell, moved_points, active_cut_x_index, active_cut_y_index)
+            poly = self._cell_square_polygon(tree, cell, moved_points)
             if len(poly) < 3:
                 continue
             vals = np.asarray(self.domain.sdf(poly), dtype=float)
@@ -79,7 +92,7 @@ class AllQuadMesher:
                 if region < 0 or self.include_exterior:
                     self._add_empty_cell(mesh, tree, cell, moved_points, x_index, y_index, region)
                 continue
-            pieces = self._split_cell_polygon(tree, cell, poly, moved_points)
+            pieces = self._split_cell_polygon(tree, cell, poly, moved_points, moved_keys)
             for clipped, region in pieces:
                 if len(clipped) < 3:
                     continue
@@ -90,87 +103,135 @@ class AllQuadMesher:
         return mesh
 
     def _augment_points_for_2ref(self, tree: Quadtree, points: set[Point]) -> set[Point]:
+        closed, bad_cells = self._closed_2ref_points(tree, set(points))
+        if bad_cells:
+            raise ValueError("quadtree still has multi-node 2-ref sides after preprocessing")
+        return closed
+
+    def _refine_tree_for_2ref(self, tree: Quadtree) -> None:
+        for _iteration in range(self.max_depth + 2):
+            _points, bad_cells = self._closed_2ref_points(tree, tree.collect_corners())
+            if not bad_cells:
+                return
+            refinable = {cell for cell in bad_cells if cell.level < self.max_depth}
+            if not refinable:
+                raise ValueError("2-ref interface has multiple hanging nodes at max depth")
+            tree.leaves.difference_update(refinable)
+            for cell in refinable:
+                tree.leaves.update(children(cell))
+            tree.refine_until_conforming(self.domain, self.boundary_band, self.max_depth)
+        raise ValueError("could not make quadtree compatible with 2-ref templates")
+
+    def _closed_2ref_points(self, tree: Quadtree, points: set[Point]) -> Tuple[set[Point], set[Cell]]:
         augmented = set(points)
-        base_x_index, base_y_index = build_side_indices(points)
-        cut_cells = {cell for cell in tree.leaves if self._cell_may_be_cut(tree, cell)}
+        augmented.update(self._cut_cell_midpoint_keys(tree))
 
-        for cell in cut_cells:
-            boundary = self._cell_boundary_points(tree, cell, base_x_index, base_y_index)
-            for a, b in zip(boundary, boundary[1:] + boundary[:1]):
-                pa = np.array(a, dtype=float)
-                pb = np.array(b, dtype=float)
-                da = float(self.domain.sdf(pa))
-                db = float(self.domain.sdf(pb))
-                if da * db > 0.0:
-                    augmented.add(round_point(tuple(0.5 * (pa + pb))))
-            augmented.update(self._sharp_side_midpoint_keys(tree, cell))
-
-        protected_sides = self._cut_neighbor_sides(tree, cut_cells)
         for _iteration in range(64):
             x_index, y_index = build_side_indices(augmented)
+            bad_cells = {
+                cell
+                for cell in tree.leaves
+                if any(len(side) > 1 for side in self._cell_side_node_keys(tree, cell, x_index, y_index))
+            }
+            if bad_cells:
+                return augmented, bad_cells
+
             additions: set[Point] = set()
             for cell in tree.leaves:
-                if cell in cut_cells:
-                    continue
-                additions.update(
-                    self._structured_closure_points(
-                        tree,
-                        cell,
-                        x_index,
-                        y_index,
-                        protected_sides.get(cell, set()),
-                    )
-                )
+                additions.update(self._corner_marking_2ref_points(tree, cell, x_index, y_index))
             additions.difference_update(augmented)
             if not additions:
-                return augmented
+                return augmented, set()
             augmented.update(additions)
-        return augmented
+        raise ValueError("2-ref corner marking did not converge")
 
-    def _structured_closure_points(
+    def _cut_cell_midpoint_keys(self, tree: Quadtree) -> set[Point]:
+        points: set[Point] = set()
+        cut_cells = {cell for cell in tree.leaves if self._cell_may_be_cut(tree, cell)}
+        for cell in cut_cells:
+            side_hits = self._cell_side_curve_hits(tree.bounds(cell))
+            for side in range(4):
+                if side not in side_hits:
+                    points.add(self._side_midpoint_key(tree, cell, side))
+            points.update(self._vertex_side_midpoint_keys(tree, cell))
+        return points
+
+    def _corner_marking_2ref_points(
         self,
         tree: Quadtree,
         cell: Cell,
         x_index: Dict[float, List[Point]],
         y_index: Dict[float, List[Point]],
-        protected_sides: set[int],
-    ) -> List[Point]:
-        x0, y0, x1, y1 = tree.bounds(cell)
-        h = x1 - x0
-        bottom = points_on_horizontal(y_index, y0, x0, x1, reverse=False)
-        right = points_on_vertical(x_index, x1, y0, y1, reverse=False)
-        top = points_on_horizontal(y_index, y1, x0, x1, reverse=False)
-        left = points_on_vertical(x_index, x0, y0, y1, reverse=False)
-        u_values = {round((p[0] - x0) / h, 12) for p in bottom + top}
-        v_values = {round((p[1] - y0) / h, 12) for p in left + right}
+    ) -> set[Point]:
+        side_nodes = self._cell_side_node_keys(tree, cell, x_index, y_index)
+        counts = [len(nodes) for nodes in side_nodes]
+        if not any(counts):
+            return set()
 
-        additions: List[Point] = []
-        if 0 not in protected_sides:
-            additions.extend(round_point((x0 + u * h, y0)) for u in u_values)
-        if 2 not in protected_sides:
-            additions.extend(round_point((x0 + u * h, y1)) for u in u_values)
-        if 3 not in protected_sides:
-            additions.extend(round_point((x0, y0 + v * h)) for v in v_values)
-        if 1 not in protected_sides:
-            additions.extend(round_point((x1, y0 + v * h)) for v in v_values)
-        return additions
+        if any(count > 1 for count in counts):
+            raise ValueError("strongly-balanced 2-ref expects at most one hanging node per side")
 
-    def _cut_neighbor_sides(
+        present = {side for side, nodes in enumerate(side_nodes) if nodes}
+        if len(present) == 4:
+            return set()
+
+        if len(present) == 1:
+            side = next(iter(present))
+            marked = self._marked_corners_for_cell(cell)
+            for corner in SIDE_CORNERS[side]:
+                if corner in marked:
+                    return {
+                        self._side_midpoint_key(tree, cell, other_corner_side(corner, side))
+                    }
+            return {self._side_midpoint_key(tree, cell, other_corner_side(SIDE_CORNERS[side][0], side))}
+
+        if len(present) == 2:
+            sides = sorted(present)
+            corner = corner_between_sides(sides[0], sides[1])
+            if corner is not None and corner in self._marked_corners_for_cell(cell):
+                return set()
+            return {
+                self._side_midpoint_key(tree, cell, side)
+                for side in range(4)
+                if side not in present
+            }
+
+        if len(present) == 3:
+            return {
+                self._side_midpoint_key(tree, cell, side)
+                for side in range(4)
+                if side not in present
+            }
+
+        return set()
+
+    def _cell_side_node_keys(
         self,
         tree: Quadtree,
-        cut_cells: set[Cell],
-    ) -> Dict[Cell, set[int]]:
-        cut_bounds = [tree.bounds(cell) for cell in cut_cells]
-        protected: Dict[Cell, set[int]] = {}
-        for cell in tree.leaves:
-            if cell in cut_cells:
-                continue
-            bounds = tree.bounds(cell)
-            for cut_bounds_item in cut_bounds:
-                side = shared_side(bounds, cut_bounds_item)
-                if side is not None:
-                    protected.setdefault(cell, set()).add(side)
-        return protected
+        cell: Cell,
+        x_index: Dict[float, List[Point]],
+        y_index: Dict[float, List[Point]],
+    ) -> List[List[Point]]:
+        x0, y0, x1, y1 = tree.bounds(cell)
+        return [
+            points_on_horizontal(y_index, y0, x0, x1, reverse=False)[1:-1],
+            points_on_vertical(x_index, x1, y0, y1, reverse=False)[1:-1],
+            points_on_horizontal(y_index, y1, x0, x1, reverse=False)[1:-1],
+            points_on_vertical(x_index, x0, y0, y1, reverse=False)[1:-1],
+        ]
+
+    def _side_midpoint_key(self, tree: Quadtree, cell: Cell, side: int) -> Point:
+        x0, y0, x1, y1 = tree.bounds(cell)
+        points = (
+            (0.5 * (x0 + x1), y0),
+            (x1, 0.5 * (y0 + y1)),
+            (0.5 * (x0 + x1), y1),
+            (x0, 0.5 * (y0 + y1)),
+        )
+        return round_point(points[side])
+
+    def _marked_corners_for_cell(self, cell: Cell) -> set[int]:
+        return {0, 2} if (cell.i + cell.j) % 2 == 0 else {1, 3}
 
     def _cell_may_be_cut(self, tree: Quadtree, cell: Cell) -> bool:
         x0, y0, x1, y1 = tree.bounds(cell)
@@ -192,15 +253,11 @@ class AllQuadMesher:
         vals = np.asarray(self.domain.sdf(pts), dtype=float)
         return bool(np.any(vals <= 0.0) and np.any(vals > 0.0))
 
-    def _sharp_side_midpoint_keys(self, tree: Quadtree, cell: Cell) -> set[Point]:
+    def _vertex_side_midpoint_keys(self, tree: Quadtree, cell: Cell) -> set[Point]:
         if not hasattr(self.domain, "vertices_in_box") or not hasattr(self.domain, "segments_in_box"):
             return set()
         bounds = tree.bounds(cell)
-        vertices = [
-            vertex
-            for vertex in self.domain.vertices_in_box(bounds, self.tol)
-            if self.domain.is_sharp_vertex(*vertex)
-        ]
+        vertices = self.domain.vertices_in_box(bounds, self.tol)
         if len(vertices) != 1:
             return set()
 
@@ -214,7 +271,7 @@ class AllQuadMesher:
         ]
         return {point for side, point in side_midpoints if side not in side_hits}
 
-    def _pull_sharp_cell_side_midpoints(
+    def _pull_vertex_cell_side_midpoints(
         self,
         tree: Quadtree,
         moved_points: Dict[Point, np.ndarray],
@@ -222,19 +279,15 @@ class AllQuadMesher:
         if not hasattr(self.domain, "vertices_in_box"):
             return
         for cell in tree.leaves:
-            vertices = [
-                vertex
-                for vertex in self.domain.vertices_in_box(tree.bounds(cell), self.tol)
-                if self.domain.is_sharp_vertex(*vertex)
-            ]
+            vertices = self.domain.vertices_in_box(tree.bounds(cell), self.tol)
             if len(vertices) != 1:
                 continue
             loop_id, vertex_id = vertices[0]
             vertex = self.domain.loops[loop_id][vertex_id]
             x0, _y0, x1, _y1 = tree.bounds(cell)
             distance = 0.125 * (x1 - x0)
-            for key in self._sharp_side_midpoint_keys(tree, cell):
-                point = np.array(key, dtype=float)
+            for key in self._vertex_side_midpoint_keys(tree, cell):
+                point = moved_points.get(key, np.array(key, dtype=float))
                 if np.linalg.norm(point - vertex) <= self.tol:
                     continue
                 moved_points[key] = move_toward(point, vertex, distance)
@@ -309,92 +362,16 @@ class AllQuadMesher:
             points_on_vertical(x_index, x0, y0, y1, reverse=False)[1:-1],
         ]
         if not self.adaptive:
-            mesh.add_midpoint_subdivision(
-                self._cell_polygon(tree, cell, moved_points, x_index, y_index),
-                region=region,
-            )
+            mesh.add_quad(corners, region=region)
             return
         if any(len(side) > 1 for side in side_nodes):
-            self._add_structured_empty_cell(mesh, tree, cell, moved_points, x_index, y_index, region)
-            return
+            raise ValueError("strongly-balanced 2-ref expects at most one hanging node per side")
         h = [moved_points[round_point(side[0])] if side else None for side in side_nodes]
         if not any(node is not None for node in h):
             mesh.add_quad(corners, region=region)
             return
         if not self._add_2ref_template(mesh, corners, h, region):
-            self._add_structured_empty_cell(mesh, tree, cell, moved_points, x_index, y_index, region)
-
-    def _add_structured_empty_cell(
-        self,
-        mesh: Mesh,
-        tree: Quadtree,
-        cell: Cell,
-        moved_points: Dict[Point, np.ndarray],
-        x_index: Dict[float, List[Point]],
-        y_index: Dict[float, List[Point]],
-        region: int,
-    ) -> None:
-        x0, y0, x1, y1 = tree.bounds(cell)
-        h = x1 - x0
-        bottom = points_on_horizontal(y_index, y0, x0, x1, reverse=False)
-        right = points_on_vertical(x_index, x1, y0, y1, reverse=False)
-        top = points_on_horizontal(y_index, y1, x0, x1, reverse=False)
-        left = points_on_vertical(x_index, x0, y0, y1, reverse=False)
-        u_values = sorted({round((p[0] - x0) / h, 12) for p in bottom + top})
-        v_values = sorted({round((p[1] - y0) / h, 12) for p in left + right})
-
-        points: Dict[Tuple[int, int], np.ndarray] = {}
-        for iu, u in enumerate(u_values):
-            for iv, v in enumerate(v_values):
-                key = round_point((x0 + u * h, y0 + v * h))
-                if key in moved_points:
-                    points[(iu, iv)] = moved_points[key]
-                    continue
-                left_p = lerp(
-                    moved_points[round_point((x0, y0))],
-                    moved_points[round_point((x0, y1))],
-                    v,
-                )
-                right_p = lerp(
-                    moved_points[round_point((x1, y0))],
-                    moved_points[round_point((x1, y1))],
-                    v,
-                )
-                bottom_p = lerp(
-                    moved_points[round_point((x0, y0))],
-                    moved_points[round_point((x1, y0))],
-                    u,
-                )
-                top_p = lerp(
-                    moved_points[round_point((x0, y1))],
-                    moved_points[round_point((x1, y1))],
-                    u,
-                )
-                bilinear = (
-                    (1.0 - u) * (1.0 - v) * moved_points[round_point((x0, y0))]
-                    + u * (1.0 - v) * moved_points[round_point((x1, y0))]
-                    + u * v * moved_points[round_point((x1, y1))]
-                    + (1.0 - u) * v * moved_points[round_point((x0, y1))]
-                )
-                points[(iu, iv)] = (
-                    (1.0 - u) * left_p
-                    + u * right_p
-                    + (1.0 - v) * bottom_p
-                    + v * top_p
-                    - bilinear
-                )
-
-        for iu in range(len(u_values) - 1):
-            for iv in range(len(v_values) - 1):
-                mesh.add_quad(
-                    [
-                        points[(iu, iv)],
-                        points[(iu + 1, iv)],
-                        points[(iu + 1, iv + 1)],
-                        points[(iu, iv + 1)],
-                    ],
-                    region=region,
-                )
+            raise ValueError("corner marking did not produce a Fig. 7 2-ref template")
 
     def _add_midpoint_subdivision(
         self,
@@ -410,18 +387,7 @@ class AllQuadMesher:
             return 0
 
         center = midpoint_subdivision_center(poly)
-        mids = []
-        for i, vertex in enumerate(poly):
-            nxt = poly[(i + 1) % len(poly)]
-            midpoint = None
-            a_key = moved_keys.get(mesh_key(vertex, self.tol))
-            b_key = moved_keys.get(mesh_key(nxt, self.tol))
-            if a_key is not None and b_key is not None:
-                mid_key = round_point((0.5 * (a_key[0] + b_key[0]), 0.5 * (a_key[1] + b_key[1])))
-                midpoint = moved_points.get(mid_key)
-            if midpoint is None:
-                midpoint = 0.5 * (vertex + nxt)
-            mids.append(midpoint)
+        mids = self._midpoint_subdivision_mids(poly, moved_points, moved_keys)
 
         count = 0
         for i, vertex in enumerate(poly):
@@ -434,6 +400,27 @@ class AllQuadMesher:
             if mesh.add_quad(quad, region=quad_region):
                 count += 1
         return count
+
+    def _midpoint_subdivision_mids(
+        self,
+        polygon: np.ndarray,
+        moved_points: Dict[Point, np.ndarray] | None = None,
+        moved_keys: Dict[Tuple[int, int], Point] | None = None,
+    ) -> List[np.ndarray]:
+        mids: List[np.ndarray] = []
+        for i, vertex in enumerate(polygon):
+            nxt = polygon[(i + 1) % len(polygon)]
+            midpoint = None
+            if moved_points is not None and moved_keys is not None:
+                a_key = moved_keys.get(mesh_key(vertex, self.tol))
+                b_key = moved_keys.get(mesh_key(nxt, self.tol))
+                if a_key is not None and b_key is not None:
+                    mid_key = round_point((0.5 * (a_key[0] + b_key[0]), 0.5 * (a_key[1] + b_key[1])))
+                    midpoint = moved_points.get(mid_key)
+            if midpoint is None:
+                midpoint = 0.5 * (vertex + nxt)
+            mids.append(midpoint)
+        return mids
 
     def _child_quad_region(self, points: List[np.ndarray], fallback: int) -> int:
         quad = clean_polygon(points, self.tol)
@@ -488,38 +475,13 @@ class AllQuadMesher:
             return False
         return True
 
-    def _cell_polygon(
+    def _cell_square_polygon(
         self,
         tree: Quadtree,
         cell: Cell,
         moved_points: Dict[Point, np.ndarray],
-        x_index: Dict[float, List[Point]],
-        y_index: Dict[float, List[Point]],
     ) -> np.ndarray:
-        x0, y0, x1, y1 = tree.bounds(cell)
-        original: List[Point] = []
-        original.extend(points_on_horizontal(y_index, y0, x0, x1, reverse=False))
-        original.extend(points_on_vertical(x_index, x1, y0, y1, reverse=False)[1:])
-        original.extend(points_on_horizontal(y_index, y1, x0, x1, reverse=True)[1:])
-        original.extend(points_on_vertical(x_index, x0, y0, y1, reverse=True)[1:])
-        return clean_polygon([moved_points[round_point(p)] for p in original], self.tol)
-
-    def _cell_boundary_points(
-        self,
-        tree: Quadtree,
-        cell: Cell,
-        x_index: Dict[float, List[Point]],
-        y_index: Dict[float, List[Point]],
-    ) -> List[Point]:
-        x0, y0, x1, y1 = tree.bounds(cell)
-        original: List[Point] = []
-        original.extend(points_on_horizontal(y_index, y0, x0, x1, reverse=False))
-        original.extend(points_on_vertical(x_index, x1, y0, y1, reverse=False)[1:])
-        original.extend(points_on_horizontal(y_index, y1, x0, x1, reverse=True)[1:])
-        original.extend(points_on_vertical(x_index, x0, y0, y1, reverse=True)[1:])
-        if len(original) > 1 and original[0] == original[-1]:
-            original.pop()
-        return original
+        return clean_polygon([moved_points[round_point(p)] for p in tree.corners(cell)], self.tol)
 
     def _split_polygon(self, polygon: np.ndarray) -> List[Tuple[np.ndarray, int]]:
         pieces: List[Tuple[np.ndarray, int]] = []
@@ -538,14 +500,12 @@ class AllQuadMesher:
         cell: Cell,
         polygon: np.ndarray,
         moved_points: Dict[Point, np.ndarray],
+        moved_keys: Dict[Tuple[int, int], Point],
     ) -> List[Tuple[np.ndarray, int]]:
         if hasattr(self.domain, "vertices_in_box") and hasattr(self.domain, "iter_segments"):
-            vertex_template = self._split_polyline_vertex_template_cell(polygon)
+            vertex_template = self._split_polyline_vertex_template_cell(tree, cell, polygon, moved_points, moved_keys)
             if vertex_template:
                 return vertex_template
-            sharp = self._split_polyline_vertex_cell(tree, cell, polygon, moved_points)
-            if sharp:
-                return sharp
             vertex_chain = self._split_polyline_vertex_chain_cell(tree, cell, polygon)
             if vertex_chain:
                 return vertex_chain
@@ -663,64 +623,15 @@ class AllQuadMesher:
         result = self._classify_polyline_pieces(pieces)
         if len(result) < 2 or len({region for _poly, region in result}) <= 1:
             return []
-        if not self._midpoint_pieces_are_usable(result):
-            return []
         return result
 
-    def _split_polyline_vertex_cell(
+    def _split_polyline_vertex_template_cell(
         self,
         tree: Quadtree,
         cell: Cell,
         polygon: np.ndarray,
         moved_points: Dict[Point, np.ndarray],
-    ) -> List[Tuple[np.ndarray, int]]:
-        vertices = self._polyline_vertices_in_polygon(polygon, sharp_only=True)
-        if len(vertices) != 1:
-            return []
-
-        loop_id, vertex_id = vertices[0]
-        loop = self.domain.loops[loop_id]
-        vertex = loop[vertex_id]
-        previous = loop[(vertex_id - 1) % len(loop)]
-        nxt = loop[(vertex_id + 1) % len(loop)]
-
-        incoming = self._segment_polygon_intersections(polygon, previous, vertex)
-        outgoing = self._segment_polygon_intersections(polygon, vertex, nxt)
-        incoming = [item for item in incoming if np.linalg.norm(item[0] - vertex) > self.tol]
-        outgoing = [item for item in outgoing if np.linalg.norm(item[0] - vertex) > self.tol]
-        if not incoming or not outgoing:
-            return []
-
-        in_hit = min(incoming, key=lambda item: np.linalg.norm(item[0] - vertex))
-        out_hit = min(outgoing, key=lambda item: np.linalg.norm(item[0] - vertex))
-        if np.linalg.norm(in_hit[0] - out_hit[0]) <= self.tol:
-            return []
-
-        parent_regions = self._sharp_parent_regions(polygon, vertex, in_hit, out_hit)
-        extra_points = self._sharp_spoke_points(tree, cell, polygon, moved_points, vertex, in_hit[0], out_hit[0])
-        polygons = split_polygon_by_spokes(
-            polygon,
-            vertex,
-            [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])] + extra_points,
-            self.tol,
-        )
-        pieces: List[Tuple[np.ndarray, int]] = []
-        for poly in polygons:
-            if len(poly) < 3:
-                continue
-            region = self._sharp_piece_region(poly, parent_regions)
-            if region < 0 or self.include_exterior:
-                pieces.append((poly, region))
-        if len(pieces) < 2:
-            return []
-        regions = {region for _poly, region in pieces}
-        if len(regions) <= 1 or not self._midpoint_pieces_are_usable(pieces, require_region_consistency=True):
-            return []
-        return pieces
-
-    def _split_polyline_vertex_template_cell(
-        self,
-        polygon: np.ndarray,
+        moved_keys: Dict[Tuple[int, int], Point],
     ) -> List[Tuple[np.ndarray, int]]:
         vertices = self._polyline_vertices_in_polygon(polygon)
         if len(vertices) != 1:
@@ -748,6 +659,62 @@ class AllQuadMesher:
         if len({region for _parent, region in parent_regions}) <= 1:
             return []
 
+        side_midpoints = [
+            point
+            for point, _edge_id, _u in self._vertex_template_side_midpoints(
+                tree,
+                cell,
+                polygon,
+                moved_points,
+                vertex,
+                {in_hit[1], out_hit[1]},
+            )
+        ]
+        pieces: List[Tuple[np.ndarray, int]] = []
+        for parent, region in parent_regions:
+            if region > 0 and not self.include_exterior:
+                continue
+            local_points = [
+                point
+                for point in side_midpoints
+                if self._side_point_belongs_to_parent(point, vertex, parent, region)
+            ]
+            children = split_polygon_by_vertex_spokes(parent, vertex, local_points, self.tol)
+            for poly in children:
+                if len(poly) >= 3:
+                    pieces.append((poly, region))
+
+        if self._midpoint_pieces_are_usable(
+            pieces,
+            require_region_consistency=True,
+            moved_points=moved_points,
+            moved_keys=moved_keys,
+        ):
+            return pieces
+
+        searched = self._search_vertex_spoke_template(
+            polygon,
+            vertex,
+            in_hit,
+            out_hit,
+            parent_regions,
+            moved_points,
+            moved_keys,
+        )
+        if searched:
+            return searched
+        return []
+
+    def _search_vertex_spoke_template(
+        self,
+        polygon: np.ndarray,
+        vertex: np.ndarray,
+        in_hit: Tuple[np.ndarray, int, float],
+        out_hit: Tuple[np.ndarray, int, float],
+        parent_regions: List[Tuple[np.ndarray, int]],
+        moved_points: Dict[Point, np.ndarray],
+        moved_keys: Dict[Tuple[int, int], Point],
+    ) -> List[Tuple[np.ndarray, int]]:
         base_hits = [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])]
         candidates = self._vertex_spoke_candidates(polygon, vertex, base_hits)
         best: Tuple[float, float, int, List[Tuple[np.ndarray, int]]] | None = None
@@ -766,7 +733,12 @@ class AllQuadMesher:
                         pieces.append((poly, region))
                 if len(pieces) < 2 or len({region for _poly, region in pieces}) <= 1:
                     continue
-                bounds = self._midpoint_piece_angle_bounds(pieces)
+                bounds = self._midpoint_piece_angle_bounds(
+                    pieces,
+                    require_region_consistency=True,
+                    moved_points=moved_points,
+                    moved_keys=moved_keys,
+                )
                 if bounds is None:
                     continue
                 min_angle, max_angle = bounds
@@ -777,6 +749,44 @@ class AllQuadMesher:
                     best = (min_angle, -max_angle, -count, pieces)
 
         return [] if best is None else best[3]
+
+    def _side_point_belongs_to_parent(
+        self,
+        point: np.ndarray,
+        vertex: np.ndarray,
+        parent: np.ndarray,
+        region: int,
+    ) -> bool:
+        point_region = -1 if float(self.domain.sdf(point)) <= 0.0 else 1
+        if point_region != region:
+            return False
+        if point_in_polygon(point, parent, self.tol):
+            return True
+        midpoint = 0.5 * (point + vertex)
+        return point_in_polygon(midpoint, parent, self.tol)
+
+    def _vertex_template_side_midpoints(
+        self,
+        tree: Quadtree,
+        cell: Cell,
+        polygon: np.ndarray,
+        moved_points: Dict[Point, np.ndarray],
+        vertex: np.ndarray,
+        curve_sides: set[int],
+    ) -> List[Tuple[np.ndarray, int, float]]:
+        side_hits = self._cell_side_curve_hits(tree.bounds(cell)) | curve_sides
+        points: List[Tuple[np.ndarray, int, float]] = []
+        for side in range(4):
+            if side in side_hits:
+                continue
+            key = self._side_midpoint_key(tree, cell, side)
+            point = moved_points.get(key)
+            if point is None:
+                point = 0.5 * (polygon[side] + polygon[(side + 1) % len(polygon)])
+            if np.linalg.norm(point - vertex) <= self.tol:
+                continue
+            points.append((point, side, 0.5))
+        return points
 
     def _vertex_spoke_candidates(
         self,
@@ -869,8 +879,15 @@ class AllQuadMesher:
         self,
         pieces: List[Tuple[np.ndarray, int]],
         require_region_consistency: bool = False,
+        moved_points: Dict[Point, np.ndarray] | None = None,
+        moved_keys: Dict[Tuple[int, int], Point] | None = None,
     ) -> bool:
-        bounds = self._midpoint_piece_angle_bounds(pieces, require_region_consistency=require_region_consistency)
+        bounds = self._midpoint_piece_angle_bounds(
+            pieces,
+            require_region_consistency=require_region_consistency,
+            moved_points=moved_points,
+            moved_keys=moved_keys,
+        )
         if bounds is None:
             return False
         min_angle, max_angle = bounds
@@ -880,6 +897,8 @@ class AllQuadMesher:
         self,
         pieces: List[Tuple[np.ndarray, int]],
         require_region_consistency: bool = False,
+        moved_points: Dict[Point, np.ndarray] | None = None,
+        moved_keys: Dict[Tuple[int, int], Point] | None = None,
     ) -> Tuple[float, float] | None:
         min_angles: List[float] = []
         max_angles: List[float] = []
@@ -888,7 +907,7 @@ class AllQuadMesher:
             if len(poly) < 3:
                 return None
             center = midpoint_subdivision_center(poly)
-            mids = 0.5 * (poly + np.roll(poly, -1, axis=0))
+            mids = self._midpoint_subdivision_mids(poly, moved_points, moved_keys)
             for i, vertex in enumerate(poly):
                 quad = clean_polygon([vertex, mids[i], center, mids[(i - 1) % len(poly)]], self.tol)
                 if len(quad) != 4:
@@ -906,38 +925,6 @@ class AllQuadMesher:
         if not min_angles:
             return None
         return min(min_angles), max(max_angles)
-
-    def _sharp_spoke_points(
-        self,
-        tree: Quadtree,
-        cell: Cell,
-        polygon: np.ndarray,
-        moved_points: Dict[Point, np.ndarray],
-        vertex: np.ndarray,
-        in_hit: np.ndarray,
-        out_hit: np.ndarray,
-    ) -> List[Tuple[np.ndarray, int, float]]:
-        hits = []
-        x0, y0, x1, y1 = tree.bounds(cell)
-        side_midpoints = [
-            (0, round_point((0.5 * (x0 + x1), y0))),
-            (1, round_point((x1, 0.5 * (y0 + y1)))),
-            (2, round_point((0.5 * (x0 + x1), y1))),
-            (3, round_point((x0, 0.5 * (y0 + y1)))),
-        ]
-        side_hits = self._cell_side_curve_hits((x0, y0, x1, y1))
-        for side_id, key in side_midpoints:
-            if side_id in side_hits or key not in moved_points:
-                continue
-            point = moved_points[key]
-            if np.linalg.norm(point - in_hit) <= self.tol or np.linalg.norm(point - out_hit) <= self.tol:
-                continue
-            nearest = closest_polygon_edge(polygon, point, self.tol)
-            if nearest is None:
-                continue
-            _nearest_point, edge_id, u = nearest
-            hits.append((point, edge_id, u))
-        return hits
 
     def _segment_polygon_intersections(
         self,
@@ -1034,20 +1021,20 @@ def points_on_vertical(
     return pts
 
 
-def shared_side(a: Bounds, b: Bounds) -> int | None:
-    eps = 1.0e-12
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    x_overlap = min(ax1, bx1) - max(ax0, bx0)
-    y_overlap = min(ay1, by1) - max(ay0, by0)
-    if abs(ay0 - by1) <= eps and x_overlap > eps:
-        return 0
-    if abs(ax1 - bx0) <= eps and y_overlap > eps:
-        return 1
-    if abs(ay1 - by0) <= eps and x_overlap > eps:
-        return 2
-    if abs(ax0 - bx1) <= eps and y_overlap > eps:
-        return 3
+def other_corner_side(corner: int, side: int) -> int:
+    sides = CORNER_SIDES[corner]
+    if sides[0] == side:
+        return sides[1]
+    if sides[1] == side:
+        return sides[0]
+    raise ValueError(f"corner {corner} is not incident to side {side}")
+
+
+def corner_between_sides(a: int, b: int) -> int | None:
+    sides = {a, b}
+    for corner, incident in enumerate(CORNER_SIDES):
+        if sides == set(incident):
+            return corner
     return None
 
 
@@ -1157,6 +1144,51 @@ def split_polygon_by_spokes(
         if len(poly) >= 3:
             polygons.append(poly)
     return polygons
+
+
+def split_polygon_by_vertex_spokes(
+    polygon: np.ndarray,
+    vertex: np.ndarray,
+    points: List[np.ndarray],
+    tol: float,
+) -> List[np.ndarray]:
+    insertions: List[Tuple[np.ndarray, int, float]] = []
+    for point in points:
+        if np.linalg.norm(point - vertex) <= tol:
+            continue
+        nearest = closest_polygon_edge(polygon, point, tol)
+        if nearest is None:
+            continue
+        _nearest_point, edge_id, u = nearest
+        insertions.append((point, edge_id, u))
+    if not insertions:
+        return [polygon]
+
+    augmented = insert_edge_points(polygon, insertions, tol)
+    vertex_idx = find_point_index(augmented, vertex, tol)
+    if vertex_idx is None:
+        split = split_polygon_by_spokes(polygon, vertex, insertions, tol)
+        return split if split else [polygon]
+
+    indexed = [(vertex_idx, vertex)]
+    for point, _edge_id, _u in insertions:
+        idx = find_point_index(augmented, point, tol)
+        if idx is not None:
+            indexed.append((idx, point))
+    indexed = dedupe_indexed_points(sorted(indexed, key=lambda item: item[0]), tol)
+    if len(indexed) < 2:
+        return [polygon]
+
+    polygons = []
+    for (start_idx, _start_point), (end_idx, _end_point) in zip(indexed, indexed[1:] + indexed[:1]):
+        path = polygon_path(augmented, start_idx, end_idx)
+        if start_idx == vertex_idx or end_idx == vertex_idx:
+            poly = clean_polygon(path, tol)
+        else:
+            poly = clean_polygon(path + [vertex], tol)
+        if len(poly) >= 3:
+            polygons.append(poly)
+    return polygons if polygons else [polygon]
 
 
 def split_polygon_by_chord(

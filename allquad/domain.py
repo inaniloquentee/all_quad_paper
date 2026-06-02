@@ -200,18 +200,24 @@ class PolylineDomain(SDFDomain):
         tol: float = 1.0e-12,
     ) -> bool:
         segments = self.segments_in_box(bounds, tol)
+        vertices = self.vertices_in_box(bounds, tol)
+        if len(vertices) > 1:
+            return True
         if len(segments) <= 1:
             return False
 
-        vertices = self.vertices_in_box(bounds, tol)
-        if len(segments) == 2 and len(vertices) == 1:
+        if len(vertices) == 1:
             loop_id, vertex_id = vertices[0]
-            loop = self.loops[loop_id]
-            incoming = (loop_id, (vertex_id - 1) % len(loop))
-            outgoing = (loop_id, vertex_id)
-            if set(segments) == {incoming, outgoing}:
+            if set(segments).issubset(self.incident_segments(loop_id, vertex_id)):
                 return False
         return True
+
+    def incident_segments(self, loop_id: int, vertex_id: int) -> set[Tuple[int, int]]:
+        loop = self.loops[loop_id]
+        return {
+            (loop_id, (vertex_id - 1) % len(loop)),
+            (loop_id, vertex_id),
+        }
 
     def is_sharp_vertex(
         self,
