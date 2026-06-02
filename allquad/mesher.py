@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, Iterable, List, Tuple
@@ -7,7 +8,7 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 
 from .domain import SDFDomain, segment_parameters
-from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_centroid
+from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_area, polygon_centroid
 from .quadtree import Cell, Quadtree, children, round_point
 
 
@@ -38,17 +39,22 @@ class AllQuadMesher:
     tol: float = 1.0e-10
     include_exterior: bool = True
     adaptive: bool = False
+    sparse_boundary: bool = True
+    sparse_boundary_ratio: float = 0.5
 
     def generate(self) -> Mesh:
-        min_depth = self.min_depth if self.adaptive else self.max_depth
+        max_depth = self._effective_max_depth()
+        min_depth = min(self.min_depth if self.adaptive else max_depth, max_depth)
+        sparse_boundary_size = self._sparse_boundary_size() if self.adaptive else None
         tree = Quadtree.build(
             self.domain,
             min_depth=min_depth,
-            max_depth=self.max_depth,
+            max_depth=max_depth,
             boundary_band=self.boundary_band,
+            sparse_boundary_size=sparse_boundary_size,
         )
         if self.adaptive:
-            self._refine_tree_for_2ref(tree)
+            self._refine_tree_for_2ref(tree, max_depth)
         base_points = tree.collect_corners()
         grid_points = base_points
         if self.adaptive:
@@ -102,24 +108,47 @@ class AllQuadMesher:
                     mesh.add_midpoint_subdivision(clipped, region=region)
         return mesh
 
+    def _sparse_boundary_size(self) -> float | None:
+        if not self.sparse_boundary or not hasattr(self.domain, "min_segment_length"):
+            return None
+        return float(self.domain.min_segment_length()) * self.sparse_boundary_ratio
+
+    def _effective_max_depth(self) -> int:
+        if not self.adaptive:
+            return self.max_depth
+        sparse_boundary_size = self._sparse_boundary_size()
+        if sparse_boundary_size is None or sparse_boundary_size <= 0.0:
+            return self.max_depth
+        xmin, ymin, xmax, ymax = self.domain.bounds
+        span = max(xmax - xmin, ymax - ymin)
+        if span <= 0.0:
+            return self.max_depth
+        sparse_depth = int(math.ceil(math.log2(span / sparse_boundary_size)))
+        return max(self.min_depth, min(self.max_depth, sparse_depth))
+
     def _augment_points_for_2ref(self, tree: Quadtree, points: set[Point]) -> set[Point]:
         closed, bad_cells = self._closed_2ref_points(tree, set(points))
         if bad_cells:
             raise ValueError("quadtree still has multi-node 2-ref sides after preprocessing")
         return closed
 
-    def _refine_tree_for_2ref(self, tree: Quadtree) -> None:
-        for _iteration in range(self.max_depth + 2):
+    def _refine_tree_for_2ref(self, tree: Quadtree, max_depth: int) -> None:
+        for _iteration in range(4 * max_depth + 8):
             _points, bad_cells = self._closed_2ref_points(tree, tree.collect_corners())
             if not bad_cells:
                 return
-            refinable = {cell for cell in bad_cells if cell.level < self.max_depth}
+            refinable = {cell for cell in bad_cells if cell.level < max_depth}
             if not refinable:
                 raise ValueError("2-ref interface has multiple hanging nodes at max depth")
             tree.leaves.difference_update(refinable)
             for cell in refinable:
                 tree.leaves.update(children(cell))
-            tree.refine_until_conforming(self.domain, self.boundary_band, self.max_depth)
+            tree.refine_until_conforming(
+                self.domain,
+                self.boundary_band,
+                max_depth,
+                self._sparse_boundary_size(),
+            )
         raise ValueError("could not make quadtree compatible with 2-ref templates")
 
     def _closed_2ref_points(self, tree: Quadtree, points: set[Point]) -> Tuple[set[Point], set[Cell]]:
@@ -584,7 +613,7 @@ class AllQuadMesher:
         for poly in split:
             if len(poly) < 3:
                 continue
-            region = -1 if float(self.domain.sdf(polygon_centroid(poly))) <= 0.0 else 1
+            region = -1 if float(self.domain.sdf(representative_point(poly, self.tol))) <= 0.0 else 1
             if region < 0 or self.include_exterior:
                 pieces.append((poly, region))
         if len(pieces) < 2:
@@ -619,8 +648,12 @@ class AllQuadMesher:
         if np.linalg.norm(in_hit[0] - out_hit[0]) <= self.tol:
             return []
 
-        pieces = split_polygon_by_chain(polygon, in_hit, [in_hit[0], vertex, out_hit[0]], out_hit, self.tol)
-        result = self._classify_polyline_pieces(pieces)
+        result = self._sharp_parent_regions(polygon, vertex, in_hit, out_hit)
+        result = [
+            (poly, region)
+            for poly, region in result
+            if region < 0 or self.include_exterior
+        ]
         if len(result) < 2 or len({region for _poly, region in result}) <= 1:
             return []
         return result
@@ -689,6 +722,8 @@ class AllQuadMesher:
             require_region_consistency=True,
             moved_points=moved_points,
             moved_keys=moved_keys,
+            min_angle_limit=24.0,
+            max_angle_limit=170.0,
         ):
             return pieces
 
@@ -742,7 +777,7 @@ class AllQuadMesher:
                 if bounds is None:
                     continue
                 min_angle, max_angle = bounds
-                if min_angle < 15.0 or max_angle > 175.0:
+                if min_angle < 24.0 or max_angle > 170.0:
                     continue
                 score = (min_angle, -max_angle, -count)
                 if best is None or score > (best[0], best[1], best[2]):
@@ -847,7 +882,7 @@ class AllQuadMesher:
         for poly in pieces:
             if len(poly) < 3:
                 continue
-            region = -1 if float(self.domain.sdf(polygon_centroid(poly))) <= 0.0 else 1
+            region = -1 if float(self.domain.sdf(representative_point(poly, self.tol))) <= 0.0 else 1
             if region < 0 or self.include_exterior:
                 result.append((poly, region))
         return result
@@ -860,16 +895,18 @@ class AllQuadMesher:
         out_hit: Tuple[np.ndarray, int, float],
     ) -> List[Tuple[np.ndarray, int]]:
         parents = split_polygon_by_chain(polygon, in_hit, [in_hit[0], vertex, out_hit[0]], out_hit, self.tol)
+        if len(parents) != 2:
+            return []
+        outside_parent, inside_parent = parents
         regions: List[Tuple[np.ndarray, int]] = []
-        for parent in parents:
-            if len(parent) < 3:
-                continue
-            region = -1 if float(self.domain.sdf(polygon_centroid(parent))) <= 0.0 else 1
-            regions.append((parent, region))
+        if len(outside_parent) >= 3:
+            regions.append((outside_parent, 1))
+        if len(inside_parent) >= 3:
+            regions.append((inside_parent, -1))
         return regions
 
     def _sharp_piece_region(self, polygon: np.ndarray, parent_regions: List[Tuple[np.ndarray, int]]) -> int:
-        center = polygon_centroid(polygon)
+        center = representative_point(polygon, self.tol)
         for parent, region in parent_regions:
             if point_in_polygon(center, parent, self.tol):
                 return region
@@ -881,6 +918,8 @@ class AllQuadMesher:
         require_region_consistency: bool = False,
         moved_points: Dict[Point, np.ndarray] | None = None,
         moved_keys: Dict[Tuple[int, int], Point] | None = None,
+        min_angle_limit: float = 15.0,
+        max_angle_limit: float = 175.0,
     ) -> bool:
         bounds = self._midpoint_piece_angle_bounds(
             pieces,
@@ -891,7 +930,7 @@ class AllQuadMesher:
         if bounds is None:
             return False
         min_angle, max_angle = bounds
-        return min_angle >= 15.0 and max_angle <= 175.0
+        return min_angle >= min_angle_limit and max_angle <= max_angle_limit
 
     def _midpoint_piece_angle_bounds(
         self,
@@ -1066,6 +1105,38 @@ def quad_angles(quad: np.ndarray, tol: float) -> List[float]:
         cosine = float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
         angles.append(float(np.degrees(np.arccos(cosine))))
     return angles
+
+
+def representative_point(polygon: np.ndarray, tol: float) -> np.ndarray:
+    poly = np.asarray(polygon, dtype=float)
+    centroid = polygon_centroid(poly)
+    if point_in_polygon(centroid, poly, tol):
+        return centroid
+
+    n = len(poly)
+    for i in range(n):
+        tri = np.asarray([poly[i], poly[(i + 1) % n], poly[(i + 2) % n]], dtype=float)
+        if abs(polygon_area(tri)) <= tol * tol:
+            continue
+        candidate = np.mean(tri, axis=0)
+        if point_in_polygon(candidate, poly, tol):
+            return candidate
+
+    span = max(float(np.ptp(poly[:, 0])), float(np.ptp(poly[:, 1])), 1.0)
+    for i, a in enumerate(poly):
+        b = poly[(i + 1) % n]
+        edge = b - a
+        length = float(np.linalg.norm(edge))
+        if length <= tol:
+            continue
+        normal = np.array([-edge[1], edge[0]], dtype=float) / length
+        midpoint = 0.5 * (a + b)
+        for scale in (1.0e-8, 1.0e-6, 1.0e-4, 1.0e-3):
+            candidate = midpoint + scale * span * normal
+            if point_in_polygon(candidate, poly, tol):
+                return candidate
+
+    return centroid
 
 
 def point_in_polygon(point: np.ndarray, polygon: np.ndarray, tol: float) -> bool:

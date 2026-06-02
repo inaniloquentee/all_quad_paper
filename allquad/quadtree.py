@@ -28,6 +28,7 @@ class Quadtree:
         min_depth: int = 2,
         max_depth: int = 6,
         boundary_band: float = 0.55,
+        sparse_boundary_size: float | None = None,
     ) -> "Quadtree":
         xmin, ymin, xmax, ymax = domain.bounds
         span = max(xmax - xmin, ymax - ymin)
@@ -41,21 +42,30 @@ class Quadtree:
         while stack:
             cell = stack.pop()
             if cell.level < min_depth or (
-                cell.level < max_depth and tree._needs_refinement(domain, cell, boundary_band)
+                cell.level < max_depth
+                and tree._needs_refinement(domain, cell, boundary_band, sparse_boundary_size)
             ):
                 stack.extend(children(cell))
             else:
                 leaves.add(cell)
 
         tree.leaves = leaves
-        tree.refine_until_conforming(domain, boundary_band, max_depth)
+        tree.refine_until_conforming(domain, boundary_band, max_depth, sparse_boundary_size)
         return tree
 
-    def _needs_refinement(self, domain: SDFDomain, cell: Cell, boundary_band: float) -> bool:
+    def _needs_refinement(
+        self,
+        domain: SDFDomain,
+        cell: Cell,
+        boundary_band: float,
+        sparse_boundary_size: float | None = None,
+    ) -> bool:
         x0, y0, x1, y1 = self.bounds(cell)
         s = x1 - x0
         if hasattr(domain, "should_refine_cell_for_polyline") and domain.should_refine_cell_for_polyline((x0, y0, x1, y1)):
             return True
+        if sparse_boundary_size is not None and s <= sparse_boundary_size:
+            return False
         pts = np.array(
             [
                 [x0, y0],
@@ -103,6 +113,7 @@ class Quadtree:
         domain: SDFDomain,
         boundary_band: float,
         max_depth: int,
+        sparse_boundary_size: float | None = None,
     ) -> None:
         """Refine and strongly balance until every leaf satisfies the paper's preconditions."""
 
@@ -110,7 +121,8 @@ class Quadtree:
             refine = {
                 cell
                 for cell in self.leaves
-                if cell.level < max_depth and self._needs_refinement(domain, cell, boundary_band)
+                if cell.level < max_depth
+                and self._needs_refinement(domain, cell, boundary_band, sparse_boundary_size)
             }
             if refine:
                 self.leaves.difference_update(refine)

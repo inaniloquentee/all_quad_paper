@@ -21,6 +21,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default="outputs/circle", help="output prefix or directory/name")
     parser.add_argument("--inside-only", action="store_true", help="only output the interior mesh")
     parser.add_argument("--adaptive", action="store_true", help="adaptive quadtree mode with 2-ref transition templates")
+    parser.add_argument(
+        "--dense-boundary",
+        action="store_true",
+        help="disable shortest-segment sparse stopping for adaptive polyline inputs",
+    )
+    parser.add_argument(
+        "--sparse-boundary-ratio",
+        type=float,
+        default=0.5,
+        help="target adaptive boundary cell size as a multiple of the shortest input segment",
+    )
     parser.add_argument("--no-plot", action="store_true", help="skip PNG plot generation")
     return parser
 
@@ -37,6 +48,8 @@ def main(argv: list[str] | None = None) -> None:
         boundary_band=args.boundary_band,
         include_exterior=not args.inside_only,
         adaptive=args.adaptive,
+        sparse_boundary=not args.dense_boundary,
+        sparse_boundary_ratio=args.sparse_boundary_ratio,
     )
     mesh = mesher.generate()
     prefix = Path(args.out)

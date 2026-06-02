@@ -69,6 +69,11 @@ Useful parameters:
 - `--repelling axis`: move horizontally/vertically, as in Fig. 4(c).
 - `--clearance-ratio 0.25`: paper value `D = s / 4`.
 - `--max-depth`: background grid resolution.
+- `--sparse-boundary-ratio 0.5`: in adaptive polyline mode, cap the effective
+  boundary depth from the shortest input segment instead of refining every
+  boundary cell to `--max-depth`.
+- `--dense-boundary`: disable the shortest-segment sparse cap and use the full
+  requested adaptive boundary depth.
 - `--inside-only`: omit the exterior mesh if you only want the old one-sided
   output.
 - `--domain circle`: use a built-in analytic demo instead of `--input-json`.
@@ -93,6 +98,12 @@ point tolerance. The default regression range is `15` to `165` degrees; the
 adaptive polyline examples are checked with a paper-aligned sharp-feature guard:
 minimum angle at least `24` degrees and maximum angle at most `170` degrees.
 
+With the default sparse cap, the example commands still accept `--max-depth 7`,
+but the effective adaptive depth is chosen from the shortest discrete input
+segment. The current examples resolve to depth `6` for `wobbly_loop` and depth
+`4` for `concave_polygon` and `box_with_hole`, keeping the boundary region
+readable while preserving the angle and topology checks.
+
 ## Notes on fidelity
 
 The paper treats input geometry as curves and vertices. This implementation now
@@ -104,7 +115,9 @@ polyline vertex is inserted, adjacent curve hits are connected through that
 vertex, non-intersected side midpoints are pulled toward the vertex by `s / 8`,
 and auxiliary edge spokes are selected using the actual midpoint-subdivision
 points used by the final mesh. This keeps the interior/exterior interface on the
-original discrete boundary instead of on analytic SDF chords.
+original discrete boundary instead of on analytic SDF chords. Vertex-chain
+parents are labelled from the oriented input loop, so concave vertex cells do
+not fall back to a straight SDF chord between neighboring boundary hits.
 
 Adaptive transitions now use the paper's two-refinement (2-ref) templates for
 coarse/fine interfaces. The quadtree is refined until every empty adaptive cell

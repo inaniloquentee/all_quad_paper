@@ -177,6 +177,12 @@ class PolylineDomain(SDFDomain):
             for edge_id in range(len(loop)):
                 yield loop_id, edge_id, loop[edge_id], loop[(edge_id + 1) % len(loop)]
 
+    def min_segment_length(self) -> float:
+        lengths = [float(np.linalg.norm(b - a)) for _loop_id, _edge_id, a, b in self.iter_segments()]
+        if not lengths:
+            raise ValueError("polyline input must contain at least one segment")
+        return min(lengths)
+
     def vertices_in_box(self, bounds: Tuple[float, float, float, float], tol: float = 1.0e-12) -> List[Tuple[int, int]]:
         x0, y0, x1, y1 = bounds
         vertices: List[Tuple[int, int]] = []
