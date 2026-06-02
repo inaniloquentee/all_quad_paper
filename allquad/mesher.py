@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Dict, Iterable, List, Tuple
 
@@ -40,12 +40,34 @@ class AllQuadMesher:
     include_exterior: bool = True
     adaptive: bool = False
     sparse_boundary: bool = True
-    sparse_boundary_ratio: float = 0.5
+    sparse_boundary_ratio: float = 1.0
     quality_relaxation: bool = True
     quality_relaxation_iters: int = 8
+    last_effective_depth: int | None = field(default=None, init=False)
+    last_sparse_attempts: List[Dict[str, float | bool]] = field(default_factory=list, init=False)
 
     def generate(self) -> Mesh:
+        self.last_sparse_attempts = []
+        if self._uses_sparse_polyline_depth():
+            start_depth = self._effective_max_depth()
+            last_mesh: Mesh | None = None
+            for depth in range(start_depth, self.max_depth + 1):
+                mesh = self._generate_at_depth(depth)
+                self.last_effective_depth = depth
+                report = self._sparse_requirement_report(mesh)
+                report["depth"] = float(depth)
+                self.last_sparse_attempts.append(report)
+                if report["ok"]:
+                    return mesh
+                last_mesh = mesh
+            if last_mesh is not None:
+                return last_mesh
+
         max_depth = self._effective_max_depth()
+        self.last_effective_depth = max_depth
+        return self._generate_at_depth(max_depth)
+
+    def _generate_at_depth(self, max_depth: int) -> Mesh:
         min_depth = min(self.min_depth if self.adaptive else max_depth, max_depth)
         sparse_boundary_size = self._sparse_boundary_size() if self.adaptive else None
         tree = Quadtree.build(
@@ -112,6 +134,48 @@ class AllQuadMesher:
             self._relax_free_vertices(mesh)
         return mesh
 
+    def _uses_sparse_polyline_depth(self) -> bool:
+        return (
+            self.adaptive
+            and self.sparse_boundary
+            and hasattr(self.domain, "min_segment_length")
+            and self._sparse_boundary_size() is not None
+        )
+
+    def _sparse_requirement_report(self, mesh: Mesh) -> Dict[str, float | bool]:
+        quality = mesh.quality()
+        by_region = mesh.quality_by_region()
+        topology = mesh.topology(self.domain.sdf)
+        ok = (
+            quality["quads"] > 0
+            and quality["min_area"] > 0.0
+            and quality["min_angle"] >= 30.0
+            and quality["max_angle"] <= 150.0
+            and topology["nonmanifold_edges"] == 0.0
+        )
+        if self.include_exterior:
+            ok = (
+                ok
+                and by_region.get("interior", {}).get("quads", 0.0) > 0.0
+                and by_region.get("exterior", {}).get("quads", 0.0) > 0.0
+                and topology.get("interface_edges", 0.0) > 0.0
+            )
+            midpoint_error = topology.get("max_interface_midpoint_error")
+            if midpoint_error is not None:
+                ok = ok and midpoint_error <= 1.0e-6
+        else:
+            ok = ok and by_region.get("interior", {}).get("quads", 0.0) > 0.0
+
+        return {
+            "ok": bool(ok),
+            "quads": quality["quads"],
+            "min_angle": quality["min_angle"],
+            "max_angle": quality["max_angle"],
+            "nonmanifold_edges": topology["nonmanifold_edges"],
+            "interface_edges": topology.get("interface_edges", 0.0),
+            "max_interface_midpoint_error": topology.get("max_interface_midpoint_error", 0.0),
+        }
+
     def _sparse_boundary_size(self) -> float | None:
         if not self.sparse_boundary or not hasattr(self.domain, "min_segment_length"):
             return None
@@ -127,7 +191,7 @@ class AllQuadMesher:
         span = max(xmax - xmin, ymax - ymin)
         if span <= 0.0:
             return self.max_depth
-        sparse_depth = int(math.ceil(math.log2(span / sparse_boundary_size)))
+        sparse_depth = int(round(math.log2(span / sparse_boundary_size)))
         return max(self.min_depth, min(self.max_depth, sparse_depth))
 
     def _augment_points_for_2ref(self, tree: Quadtree, points: set[Point]) -> set[Point]:

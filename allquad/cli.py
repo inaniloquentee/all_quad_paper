@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sparse-boundary-ratio",
         type=float,
-        default=0.5,
+        default=1.0,
         help="target adaptive boundary cell size as a multiple of the shortest input segment",
     )
     parser.add_argument(
@@ -67,6 +67,10 @@ def main(argv: list[str] | None = None) -> None:
         plot_mesh(mesh, domain, prefix.with_suffix(".png"))
 
     report = {
+        "settings": {
+            "effective_depth": mesher.last_effective_depth,
+            "sparse_attempts": mesher.last_sparse_attempts,
+        },
         "quality": mesh.quality(),
         "quality_by_region": mesh.quality_by_region(),
         "topology": mesh.topology(domain.sdf),

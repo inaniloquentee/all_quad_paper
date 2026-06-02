@@ -69,9 +69,11 @@ Useful parameters:
 - `--repelling axis`: move horizontally/vertically, as in Fig. 4(c).
 - `--clearance-ratio 0.25`: paper value `D = s / 4`.
 - `--max-depth`: background grid resolution.
-- `--sparse-boundary-ratio 0.5`: in adaptive polyline mode, cap the effective
+- `--sparse-boundary-ratio 1.0`: in adaptive polyline mode, target the effective
   boundary depth from the shortest input segment instead of refining every
-  boundary cell to `--max-depth`.
+  boundary cell to `--max-depth`. The mesher starts with the dyadic cell size
+  closest to this target and only refines further if the strict quality/topology
+  checks fail.
 - `--dense-boundary`: disable the shortest-segment sparse cap and use the full
   requested adaptive boundary depth.
 - `--no-quality-relaxation`: disable the final local relaxation pass that moves
@@ -102,9 +104,10 @@ minimum angle at least `30` degrees and maximum angle at most `150` degrees.
 
 With the default sparse cap, the example commands still accept `--max-depth 7`,
 but the effective adaptive depth is chosen from the shortest discrete input
-segment. The current examples resolve to depth `6` for `wobbly_loop` and depth
-`4` for `concave_polygon` and `box_with_hole`, keeping the boundary region
-readable while preserving the angle and topology checks.
+segment and then increased only if required by the strict checks. The current
+examples resolve to depth `5` for `wobbly_loop` and depth `3` for
+`concave_polygon` and `box_with_hole`, keeping the boundary
+region readable while preserving the angle, topology, and 2-ref checks.
 
 After the paper templates are applied, adaptive outputs run a local relaxation
 pass on free same-region vertices. The pass keeps input-boundary vertices and
@@ -131,4 +134,6 @@ not fall back to a straight SDF chord between neighboring boundary hits.
 Adaptive transitions now use the paper's two-refinement (2-ref) templates for
 coarse/fine interfaces. The quadtree is refined until every empty adaptive cell
 has at most one hanging node on each side, then the Fig. 7 templates are applied
-with checkerboard corner marking.
+with checkerboard corner marking. The regression checker reports this invariant
+explicitly, along with the ratio between the smallest leaf size and the shortest
+input segment.
