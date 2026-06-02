@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="target adaptive boundary cell size as a multiple of the shortest input segment",
     )
+    parser.add_argument(
+        "--no-quality-relaxation",
+        action="store_true",
+        help="disable local non-boundary vertex relaxation for stricter angle quality",
+    )
     parser.add_argument("--no-plot", action="store_true", help="skip PNG plot generation")
     return parser
 
@@ -50,6 +55,7 @@ def main(argv: list[str] | None = None) -> None:
         adaptive=args.adaptive,
         sparse_boundary=not args.dense_boundary,
         sparse_boundary_ratio=args.sparse_boundary_ratio,
+        quality_relaxation=not args.no_quality_relaxation,
     )
     mesh = mesher.generate()
     prefix = Path(args.out)

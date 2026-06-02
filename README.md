@@ -74,6 +74,8 @@ Useful parameters:
   boundary cell to `--max-depth`.
 - `--dense-boundary`: disable the shortest-segment sparse cap and use the full
   requested adaptive boundary depth.
+- `--no-quality-relaxation`: disable the final local relaxation pass that moves
+  free non-boundary vertices to meet the stricter angle target.
 - `--inside-only`: omit the exterior mesh if you only want the old one-sided
   output.
 - `--domain circle`: use a built-in analytic demo instead of `--input-json`.
@@ -85,9 +87,9 @@ Useful parameters:
 ```powershell
 python -m compileall allquad tools
 python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
-python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
-python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
-python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
+python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 30 --max-angle 150
+python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 30 --max-angle 150
+python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 30 --max-angle 150
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
@@ -96,13 +98,20 @@ angles outside the configured quality range, and that detected geometry-boundary
 edges are present and lie on the original discrete polyline boundary to floating
 point tolerance. The default regression range is `15` to `165` degrees; the
 adaptive polyline examples are checked with a paper-aligned sharp-feature guard:
-minimum angle at least `24` degrees and maximum angle at most `170` degrees.
+minimum angle at least `30` degrees and maximum angle at most `150` degrees.
 
 With the default sparse cap, the example commands still accept `--max-depth 7`,
 but the effective adaptive depth is chosen from the shortest discrete input
 segment. The current examples resolve to depth `6` for `wobbly_loop` and depth
 `4` for `concave_polygon` and `box_with_hole`, keeping the boundary region
 readable while preserving the angle and topology checks.
+
+After the paper templates are applied, adaptive outputs run a local relaxation
+pass on free same-region vertices. The pass keeps input-boundary vertices and
+geometry-interface vertices fixed, only accepts moves that improve the local
+angle violation, and preserves the signed side of each moved vertex. This is the
+last step that brings the example outputs to the stricter `30`/`150` degree
+range without moving the discrete input boundary.
 
 ## Notes on fidelity
 

@@ -41,6 +41,8 @@ class AllQuadMesher:
     adaptive: bool = False
     sparse_boundary: bool = True
     sparse_boundary_ratio: float = 0.5
+    quality_relaxation: bool = True
+    quality_relaxation_iters: int = 8
 
     def generate(self) -> Mesh:
         max_depth = self._effective_max_depth()
@@ -106,6 +108,8 @@ class AllQuadMesher:
                     self._add_midpoint_subdivision(mesh, clipped, moved_points, moved_keys, region)
                 else:
                     mesh.add_midpoint_subdivision(clipped, region=region)
+        if self.adaptive and self.quality_relaxation:
+            self._relax_free_vertices(mesh)
         return mesh
 
     def _sparse_boundary_size(self) -> float | None:
@@ -458,6 +462,159 @@ class AllQuadMesher:
         center = np.mean(quad, axis=0)
         return -1 if float(self.domain.sdf(center)) <= 0.0 else 1
 
+    def _relax_free_vertices(self, mesh: Mesh) -> None:
+        if not mesh.quads:
+            return
+        points = np.asarray(mesh.vertices, dtype=float).copy()
+        incident: Dict[int, List[int]] = {}
+        neighbors: Dict[int, set[int]] = {}
+        edge_use: Dict[Tuple[int, int], int] = {}
+        for quad_id, quad in enumerate(mesh.quads):
+            for i, vertex_id in enumerate(quad):
+                incident.setdefault(vertex_id, []).append(quad_id)
+                neighbors.setdefault(vertex_id, set()).update({quad[(i - 1) % 4], quad[(i + 1) % 4]})
+                a = vertex_id
+                b = quad[(i + 1) % 4]
+                edge = (a, b) if a < b else (b, a)
+                edge_use[edge] = edge_use.get(edge, 0) + 1
+
+        distances = np.abs(np.asarray(self.domain.sdf(points), dtype=float))
+        fixed = distances <= 1.0e-9
+        for edge, count in edge_use.items():
+            if count == 1:
+                if distances[edge[0]] > 0.05:
+                    fixed[edge[0]] = True
+                if distances[edge[1]] > 0.05:
+                    fixed[edge[1]] = True
+
+        vertex_regions: Dict[int, set[int]] = {}
+        for quad_id, quad in enumerate(mesh.quads):
+            region = mesh.regions[quad_id]
+            for vertex_id in quad:
+                vertex_regions.setdefault(vertex_id, set()).add(region)
+
+        for _iteration in range(max(self.quality_relaxation_iters, 0)):
+            bad_vertices = self._bad_angle_vertices(mesh, points)
+            changed = 0
+            for vertex_id in sorted(bad_vertices):
+                if fixed[vertex_id] or not neighbors.get(vertex_id):
+                    continue
+                if len(vertex_regions.get(vertex_id, set())) > 1:
+                    continue
+                current = points[vertex_id].copy()
+                base_score = self._local_relaxation_score(mesh, points, incident[vertex_id])
+                candidates = self._relaxation_candidates(
+                    points,
+                    vertex_id,
+                    neighbors[vertex_id],
+                    incident[vertex_id],
+                    mesh,
+                )
+                best = current
+                best_score = base_score
+                for candidate in candidates:
+                    if not self._candidate_stays_in_region(candidate, vertex_regions.get(vertex_id, set())):
+                        continue
+                    old = points[vertex_id].copy()
+                    points[vertex_id] = candidate
+                    score = self._local_relaxation_score(mesh, points, incident[vertex_id])
+                    points[vertex_id] = old
+                    if score < best_score:
+                        best = candidate
+                        best_score = score
+                if best_score < base_score:
+                    points[vertex_id] = best
+                    changed += 1
+            if changed == 0:
+                break
+
+        mesh.vertices = [points[i].copy() for i in range(len(mesh.vertices))]
+
+    def _bad_angle_vertices(self, mesh: Mesh, points: np.ndarray) -> set[int]:
+        bad: set[int] = set()
+        for quad in mesh.quads:
+            polygon = points[list(quad)]
+            angles = quad_angles(polygon, self.tol)
+            if angles and (min(angles) < 30.0 or max(angles) > 150.0):
+                bad.update(quad)
+        return bad
+
+    def _local_relaxation_score(self, mesh: Mesh, points: np.ndarray, quad_ids: List[int]) -> Tuple[float, float, float, float]:
+        min_angle = float("inf")
+        max_angle = -float("inf")
+        min_area = float("inf")
+        for quad_id in quad_ids:
+            polygon = points[list(mesh.quads[quad_id])]
+            area = polygon_area(polygon)
+            if area <= self.tol * self.tol:
+                return (float("inf"), float("inf"), float("inf"), float("inf"))
+            angles = quad_angles(polygon, self.tol)
+            if not angles:
+                return (float("inf"), float("inf"), float("inf"), float("inf"))
+            min_angle = min(min_angle, min(angles))
+            max_angle = max(max_angle, max(angles))
+            min_area = min(min_area, area)
+        violation = max(30.0 - min_angle, max_angle - 150.0, 0.0)
+        return (violation, -min_angle, max_angle, -min_area)
+
+    def _relaxation_candidates(
+        self,
+        points: np.ndarray,
+        vertex_id: int,
+        neighbors: set[int],
+        quad_ids: List[int],
+        mesh: Mesh,
+    ) -> List[np.ndarray]:
+        current = points[vertex_id]
+        neighbor_points = [points[neighbor] for neighbor in neighbors]
+        average = np.mean(neighbor_points, axis=0)
+        scale = float(np.mean([np.linalg.norm(current - point) for point in neighbor_points]))
+        if scale <= self.tol:
+            return []
+
+        candidates: List[np.ndarray] = []
+        for alpha in (0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0):
+            candidates.append((1.0 - alpha) * current + alpha * average)
+
+        directions = [
+            np.array([1.0, 0.0]),
+            np.array([-1.0, 0.0]),
+            np.array([0.0, 1.0]),
+            np.array([0.0, -1.0]),
+        ]
+        toward_average = average - current
+        if np.linalg.norm(toward_average) > self.tol:
+            directions.append(toward_average / np.linalg.norm(toward_average))
+        for neighbor in neighbors:
+            direction = points[neighbor] - current
+            length = np.linalg.norm(direction)
+            if length > self.tol:
+                unit = direction / length
+                directions.append(unit)
+                directions.append(np.array([-unit[1], unit[0]], dtype=float))
+                directions.append(np.array([unit[1], -unit[0]], dtype=float))
+        for quad_id in quad_ids:
+            center = np.mean(points[list(mesh.quads[quad_id])], axis=0)
+            direction = center - current
+            length = np.linalg.norm(direction)
+            if length > self.tol:
+                directions.append(direction / length)
+
+        for direction in directions:
+            for step in (0.02, 0.05, 0.1, 0.2, 0.35):
+                candidates.append(current + direction * scale * step)
+        return candidates
+
+    def _candidate_stays_in_region(self, candidate: np.ndarray, regions: set[int] | None) -> bool:
+        if not regions:
+            return True
+        value = float(self.domain.sdf(candidate))
+        if regions == {-1}:
+            return value < -self.tol
+        if regions == {1}:
+            return value > self.tol
+        return False
+
     def _add_2ref_template(
         self,
         mesh: Mesh,
@@ -717,14 +874,13 @@ class AllQuadMesher:
                 if len(poly) >= 3:
                     pieces.append((poly, region))
 
-        if self._midpoint_pieces_are_usable(
+        direct_bounds = self._midpoint_piece_angle_bounds(
             pieces,
             require_region_consistency=True,
             moved_points=moved_points,
             moved_keys=moved_keys,
-            min_angle_limit=24.0,
-            max_angle_limit=170.0,
-        ):
+        )
+        if direct_bounds is not None and direct_bounds[0] >= 30.0 and direct_bounds[1] <= 150.0:
             return pieces
 
         searched = self._search_vertex_spoke_template(
@@ -738,6 +894,8 @@ class AllQuadMesher:
         )
         if searched:
             return searched
+        if direct_bounds is not None and direct_bounds[0] >= 24.0 and direct_bounds[1] <= 170.0:
+            return pieces
         return []
 
     def _search_vertex_spoke_template(
@@ -752,7 +910,7 @@ class AllQuadMesher:
     ) -> List[Tuple[np.ndarray, int]]:
         base_hits = [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])]
         candidates = self._vertex_spoke_candidates(polygon, vertex, base_hits)
-        best: Tuple[float, float, int, List[Tuple[np.ndarray, int]]] | None = None
+        best: Tuple[float, float, float, int, List[Tuple[np.ndarray, int]]] | None = None
 
         for count in range(0, min(2, len(candidates)) + 1):
             for extra in combinations(candidates, count):
@@ -777,13 +935,14 @@ class AllQuadMesher:
                 if bounds is None:
                     continue
                 min_angle, max_angle = bounds
-                if min_angle < 24.0 or max_angle > 170.0:
+                if min_angle < 15.0 or max_angle > 175.0:
                     continue
-                score = (min_angle, -max_angle, -count)
-                if best is None or score > (best[0], best[1], best[2]):
-                    best = (min_angle, -max_angle, -count, pieces)
+                violation = max(30.0 - min_angle, max_angle - 150.0, 0.0)
+                score = (-violation, min_angle, -max_angle, -count)
+                if best is None or score > (best[0], best[1], best[2], best[3]):
+                    best = (score[0], score[1], score[2], score[3], pieces)
 
-        return [] if best is None else best[3]
+        return [] if best is None else best[4]
 
     def _side_point_belongs_to_parent(
         self,
