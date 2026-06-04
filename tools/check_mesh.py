@@ -29,6 +29,7 @@ def main() -> None:
     quality = mesh.quality()
     by_region = mesh.quality_by_region()
     topology = mesh.topology(domain.sdf)
+    paper = mesher._paper_quadtree_report(mesher.last_quadtree)
     two_ref = check_two_ref(domain, mesher) if args.adaptive else {}
     boundary = check_boundary_conformance(mesh, domain) if args.adaptive else {}
 
@@ -37,6 +38,7 @@ def main() -> None:
     assert by_region["exterior"]["quads"] > 0
     assert quality["min_area"] > 0.0
     assert topology["nonmanifold_edges"] == 0.0
+    assert paper["ok"]
     assert topology["interface_edges"] > 0
     if boundary:
         assert boundary["interface_edges_not_on_input_segment"] == 0
@@ -57,6 +59,7 @@ def main() -> None:
         "quality": quality,
         "quality_by_region": by_region,
         "topology": topology,
+        "paper_quadtree": paper,
         "two_ref": two_ref,
         "boundary": boundary,
     }

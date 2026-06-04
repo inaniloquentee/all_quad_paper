@@ -79,6 +79,7 @@ def main(argv: list[str] | None = None) -> None:
         "quality": mesh.quality(),
         "quality_by_region": mesh.quality_by_region(),
         "topology": mesh.topology(domain.sdf),
+        "paper_quadtree": mesher._paper_quadtree_report(mesher.last_quadtree),
     }
     prefix.with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

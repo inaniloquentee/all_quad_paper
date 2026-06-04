@@ -10,6 +10,10 @@
         "nonmanifold_edges": 0.0,
         "interface_edges": 80.0,
         "max_interface_midpoint_error": 1.2412670766236366e-16,
+        "paper_quadtree_ok": true,
+        "strong_balance_bad_pairs": 0.0,
+        "multi_vertex_cells": 0.0,
+        "disjoint_multi_curve_cells": 0.0,
         "depth": 3.0
       }
     ]
@@ -55,6 +59,14 @@
     "avg_interface_midpoint_error": 2.9089661783768693e-17,
     "max_interface_endpoint_error": 1.5700924586837752e-16,
     "avg_interface_endpoint_error": 2.2487905054815187e-17
+  },
+  "paper_quadtree": {
+    "ok": true,
+    "strong_balance_bad_pairs": 0.0,
+    "max_touching_level_delta": 0.0,
+    "multi_vertex_cells": 0.0,
+    "multi_curve_cells": 14.0,
+    "disjoint_multi_curve_cells": 0.0
   },
   "two_ref": {
     "bad_cells": 0,

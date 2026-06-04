@@ -8,7 +8,7 @@ import numpy as np
 
 from .domain import SDFDomain, cross2, segment_parameters
 from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_area, polygon_centroid
-from .quadtree import Cell, Quadtree, children, round_point
+from .quadtree import Cell, Quadtree, boxes_touch, children, round_point
 
 
 Point = Tuple[float, float]
@@ -44,6 +44,7 @@ class AllQuadMesher:
     quality_relaxation_iters: int = 8
     last_effective_depth: int | None = field(default=None, init=False)
     last_sparse_attempts: List[Dict[str, float | bool]] = field(default_factory=list, init=False)
+    last_quadtree: Quadtree | None = field(default=None, init=False, repr=False)
 
     def generate(self) -> Mesh:
         self.last_sparse_attempts = []
@@ -88,6 +89,7 @@ class AllQuadMesher:
         )
         if self.adaptive:
             self._refine_tree_for_2ref(tree, max_depth)
+        self.last_quadtree = tree
         base_points = tree.collect_corners()
         grid_points = base_points
         if self.adaptive:
@@ -155,10 +157,12 @@ class AllQuadMesher:
         quality = mesh.quality()
         by_region = mesh.quality_by_region()
         topology = mesh.topology(self.domain.sdf)
+        paper = self._paper_quadtree_report(self.last_quadtree)
         ok = (
             quality["quads"] > 0
             and quality["min_area"] > 0.0
             and topology["nonmanifold_edges"] == 0.0
+            and bool(paper["ok"])
         )
         if self.include_exterior:
             ok = (
@@ -184,7 +188,85 @@ class AllQuadMesher:
             "nonmanifold_edges": topology["nonmanifold_edges"],
             "interface_edges": topology.get("interface_edges", 0.0),
             "max_interface_midpoint_error": topology.get("max_interface_midpoint_error", 0.0),
+            "paper_quadtree_ok": bool(paper["ok"]),
+            "strong_balance_bad_pairs": paper["strong_balance_bad_pairs"],
+            "multi_vertex_cells": paper["multi_vertex_cells"],
+            "disjoint_multi_curve_cells": paper["disjoint_multi_curve_cells"],
         }
+
+    def _paper_quadtree_report(self, tree: Quadtree | None) -> Dict[str, float | bool]:
+        if tree is None:
+            return {
+                "ok": True,
+                "strong_balance_bad_pairs": 0.0,
+                "max_touching_level_delta": 0.0,
+                "multi_vertex_cells": 0.0,
+                "multi_curve_cells": 0.0,
+                "disjoint_multi_curve_cells": 0.0,
+            }
+
+        cells = sorted(tree.leaves)
+        strong_balance_bad_pairs = 0
+        max_touching_level_delta = 0
+        for index, first in enumerate(cells):
+            first_bounds = tree.bounds(first)
+            for second in cells[index + 1 :]:
+                if not boxes_touch(first_bounds, tree.bounds(second)):
+                    continue
+                delta = abs(first.level - second.level)
+                max_touching_level_delta = max(max_touching_level_delta, delta)
+                if delta > 1:
+                    strong_balance_bad_pairs += 1
+
+        multi_vertex_cells = 0
+        multi_curve_cells = 0
+        disjoint_multi_curve_cells = 0
+        if hasattr(self.domain, "segments_in_box") and hasattr(self.domain, "vertices_in_box"):
+            for cell in cells:
+                bounds = tree.bounds(cell)
+                vertices = self.domain.vertices_in_box(bounds, self.tol)
+                if len(vertices) > 1:
+                    multi_vertex_cells += 1
+                segments = self.domain.segments_in_box(bounds, self.tol)
+                if len(segments) <= 1:
+                    continue
+                multi_curve_cells += 1
+                if not self._polyline_multicurve_cell_is_paper_exception(segments, vertices):
+                    disjoint_multi_curve_cells += 1
+
+        ok = (
+            strong_balance_bad_pairs == 0
+            and multi_vertex_cells == 0
+            and disjoint_multi_curve_cells == 0
+        )
+        return {
+            "ok": bool(ok),
+            "strong_balance_bad_pairs": float(strong_balance_bad_pairs),
+            "max_touching_level_delta": float(max_touching_level_delta),
+            "multi_vertex_cells": float(multi_vertex_cells),
+            "multi_curve_cells": float(multi_curve_cells),
+            "disjoint_multi_curve_cells": float(disjoint_multi_curve_cells),
+        }
+
+    def _polyline_multicurve_cell_is_paper_exception(
+        self,
+        segments: Iterable[Tuple[int, int]],
+        vertices: Iterable[Tuple[int, int]],
+    ) -> bool:
+        segment_set = set(segments)
+        vertex_list = list(vertices)
+        if not hasattr(self.domain, "incident_segments"):
+            return False
+        for loop_id, vertex_id in vertex_list:
+            if segment_set.issubset(self.domain.incident_segments(loop_id, vertex_id)):
+                return True
+        if not hasattr(self.domain, "loops"):
+            return False
+        for loop_id, loop in enumerate(self.domain.loops):
+            for vertex_id in range(len(loop)):
+                if segment_set.issubset(self.domain.incident_segments(loop_id, vertex_id)):
+                    return True
+        return False
 
     def _sparse_boundary_size(self) -> float | None:
         if not self.sparse_boundary or not hasattr(self.domain, "min_segment_length"):
@@ -211,7 +293,8 @@ class AllQuadMesher:
         return closed
 
     def _refine_tree_for_2ref(self, tree: Quadtree, max_depth: int) -> None:
-        for _iteration in range(4 * max_depth + 8):
+        max_refinement_rounds = max(64, (4**max_depth - 1) // 3 + 1)
+        for _iteration in range(max_refinement_rounds):
             _points, bad_cells = self._closed_2ref_points(tree, tree.collect_corners())
             if not bad_cells:
                 return
