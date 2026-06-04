@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from itertools import combinations
+import math
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from .domain import SDFDomain, segment_parameters
+from .domain import SDFDomain, cross2, segment_parameters
 from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_area, polygon_centroid
 from .quadtree import Cell, Quadtree, children, round_point
 
@@ -202,7 +201,7 @@ class AllQuadMesher:
         span = max(xmax - xmin, ymax - ymin)
         if span <= 0.0:
             return self.max_depth
-        sparse_depth = int(round(math.log2(span / sparse_boundary_size)))
+        sparse_depth = int(math.ceil(math.log2(span / sparse_boundary_size)))
         return max(self.min_depth, min(self.max_depth, sparse_depth))
 
     def _augment_points_for_2ref(self, tree: Quadtree, points: set[Point]) -> set[Point]:
@@ -817,8 +816,6 @@ class AllQuadMesher:
         result = self._classify_polyline_pieces(pieces)
         if len(result) < 2 or len({region for _poly, region in result}) <= 1:
             return []
-        if not self._midpoint_pieces_are_usable(result):
-            return []
         return result
 
     def _split_polyline_single_segment_cell(
@@ -946,78 +943,43 @@ class AllQuadMesher:
             ]
             children = split_polygon_by_vertex_spokes(parent, vertex, local_points, self.tol)
             for poly in children:
-                if len(poly) >= 3:
-                    pieces.append((poly, region))
+                for piece in self._decompose_vertex_piece(poly, vertex):
+                    if len(piece) >= 3:
+                        pieces.append((piece, region))
 
-        direct_bounds = self._midpoint_piece_angle_bounds(
-            pieces,
-            require_region_consistency=True,
-            moved_points=moved_points,
-            moved_keys=moved_keys,
-        )
-        if direct_bounds is not None and direct_bounds[0] >= 30.0 and direct_bounds[1] <= 150.0:
-            return pieces
+        return pieces
 
-        searched = self._search_vertex_spoke_template(
-            polygon,
-            vertex,
-            in_hit,
-            out_hit,
-            parent_regions,
-            moved_points,
-            moved_keys,
-        )
-        if searched:
-            return searched
-        if direct_bounds is not None and direct_bounds[0] >= 24.0 and direct_bounds[1] <= 170.0:
-            return pieces
-        return []
+    def _decompose_vertex_piece(self, polygon: np.ndarray, vertex: np.ndarray) -> List[np.ndarray]:
+        poly = clean_polygon(polygon, self.tol)
+        if len(poly) <= 3 or polygon_is_convex(poly, self.tol):
+            return [poly]
 
-    def _search_vertex_spoke_template(
-        self,
-        polygon: np.ndarray,
-        vertex: np.ndarray,
-        in_hit: Tuple[np.ndarray, int, float],
-        out_hit: Tuple[np.ndarray, int, float],
-        parent_regions: List[Tuple[np.ndarray, int]],
-        moved_points: Dict[Point, np.ndarray],
-        moved_keys: Dict[Tuple[int, int], Point],
-    ) -> List[Tuple[np.ndarray, int]]:
-        base_hits = [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])]
-        candidates = self._vertex_spoke_candidates(polygon, vertex, base_hits)
-        best: Tuple[float, float, float, int, List[Tuple[np.ndarray, int]]] | None = None
+        vertex_index = find_point_index(list(poly), vertex, self.tol)
+        if vertex_index is None:
+            return [poly]
 
-        for count in range(0, min(2, len(candidates)) + 1):
-            for extra in combinations(candidates, count):
-                if len({edge_id for _point, edge_id, _u in extra}) != len(extra):
-                    continue
-                polygons = split_polygon_by_spokes(polygon, vertex, base_hits + list(extra), self.tol)
-                pieces: List[Tuple[np.ndarray, int]] = []
-                for poly in polygons:
-                    if len(poly) < 3:
-                        continue
-                    region = self._sharp_piece_region(poly, parent_regions)
-                    if region < 0 or self.include_exterior:
-                        pieces.append((poly, region))
-                if len(pieces) < 2 or len({region for _poly, region in pieces}) <= 1:
-                    continue
-                bounds = self._midpoint_piece_angle_bounds(
-                    pieces,
-                    require_region_consistency=True,
-                    moved_points=moved_points,
-                    moved_keys=moved_keys,
-                )
-                if bounds is None:
-                    continue
-                min_angle, max_angle = bounds
-                if min_angle < 15.0 or max_angle > 175.0:
-                    continue
-                violation = max(30.0 - min_angle, max_angle - 150.0, 0.0)
-                score = (-violation, min_angle, -max_angle, -count)
-                if best is None or score > (best[0], best[1], best[2], best[3]):
-                    best = (score[0], score[1], score[2], score[3], pieces)
+        edge_midpoints: List[np.ndarray] = []
+        for i, point in enumerate(poly):
+            next_index = (i + 1) % len(poly)
+            if i == vertex_index or next_index == vertex_index:
+                continue
+            nxt = poly[next_index]
+            if np.linalg.norm(nxt - point) > self.tol:
+                edge_midpoints.append(0.5 * (point + nxt))
 
-        return [] if best is None else best[4]
+        split = split_polygon_by_vertex_spokes(poly, vertex, edge_midpoints, self.tol)
+        if len(split) > 1:
+            pieces = [piece for piece in split if len(piece) >= 3]
+            if pieces and all(len(piece) <= 3 or polygon_is_convex(piece, self.tol) for piece in pieces):
+                return pieces
+
+        ordered = list(poly[vertex_index:]) + list(poly[:vertex_index])
+        pieces: List[np.ndarray] = []
+        for i in range(1, len(ordered) - 1):
+            tri = clean_polygon([ordered[0], ordered[i], ordered[i + 1]], self.tol)
+            if len(tri) == 3:
+                pieces.append(tri)
+        return pieces or [poly]
 
     def _side_point_belongs_to_parent(
         self,
@@ -1056,26 +1018,6 @@ class AllQuadMesher:
                 continue
             points.append((point, side, 0.5))
         return points
-
-    def _vertex_spoke_candidates(
-        self,
-        polygon: np.ndarray,
-        vertex: np.ndarray,
-        base_hits: List[Tuple[np.ndarray, int, float]],
-    ) -> List[Tuple[np.ndarray, int, float]]:
-        fractions = (0.05, 0.10, 0.30, 0.45, 0.50, 0.70, 0.75, 0.90)
-        candidates: List[Tuple[np.ndarray, int, float]] = []
-        base_points = [point for point, _edge_id, _u in base_hits]
-        for edge_id, a in enumerate(polygon):
-            b = polygon[(edge_id + 1) % len(polygon)]
-            for u in fractions:
-                point = a + u * (b - a)
-                if np.linalg.norm(point - vertex) <= self.tol:
-                    continue
-                if any(np.linalg.norm(point - existing) <= self.tol for existing in base_points):
-                    continue
-                candidates.append((point, edge_id, u))
-        return candidates
 
     def _polyline_vertices_in_polygon(
         self,
@@ -1145,59 +1087,6 @@ class AllQuadMesher:
             if point_in_polygon(center, parent, self.tol):
                 return region
         return -1 if float(self.domain.sdf(center)) <= 0.0 else 1
-
-    def _midpoint_pieces_are_usable(
-        self,
-        pieces: List[Tuple[np.ndarray, int]],
-        require_region_consistency: bool = False,
-        moved_points: Dict[Point, np.ndarray] | None = None,
-        moved_keys: Dict[Tuple[int, int], Point] | None = None,
-        min_angle_limit: float = 15.0,
-        max_angle_limit: float = 175.0,
-    ) -> bool:
-        bounds = self._midpoint_piece_angle_bounds(
-            pieces,
-            require_region_consistency=require_region_consistency,
-            moved_points=moved_points,
-            moved_keys=moved_keys,
-        )
-        if bounds is None:
-            return False
-        min_angle, max_angle = bounds
-        return min_angle >= min_angle_limit and max_angle <= max_angle_limit
-
-    def _midpoint_piece_angle_bounds(
-        self,
-        pieces: List[Tuple[np.ndarray, int]],
-        require_region_consistency: bool = False,
-        moved_points: Dict[Point, np.ndarray] | None = None,
-        moved_keys: Dict[Tuple[int, int], Point] | None = None,
-    ) -> Tuple[float, float] | None:
-        min_angles: List[float] = []
-        max_angles: List[float] = []
-        for polygon, _region in pieces:
-            poly = clean_polygon(polygon, self.tol)
-            if len(poly) < 3:
-                return None
-            center = midpoint_subdivision_center(poly)
-            mids = self._midpoint_subdivision_mids(poly, moved_points, moved_keys)
-            for i, vertex in enumerate(poly):
-                quad = clean_polygon([vertex, mids[i], center, mids[(i - 1) % len(poly)]], self.tol)
-                if len(quad) != 4:
-                    return None
-                angles = quad_angles(quad, self.tol)
-                if not angles:
-                    return None
-                min_angles.append(min(angles))
-                max_angles.append(max(angles))
-                if require_region_consistency:
-                    quad_center = np.mean(quad, axis=0)
-                    quad_region = -1 if float(self.domain.sdf(quad_center)) <= 0.0 else 1
-                    if quad_region != _region:
-                        return None
-        if not min_angles:
-            return None
-        return min(min_angles), max(max_angles)
 
     def _segment_polygon_intersections(
         self,
@@ -1387,6 +1276,20 @@ def point_in_polygon(point: np.ndarray, polygon: np.ndarray, tol: float) -> bool
         ):
             inside = not inside
     return inside
+
+
+def polygon_is_convex(polygon: np.ndarray, tol: float) -> bool:
+    if len(polygon) < 4:
+        return True
+    for i, point in enumerate(polygon):
+        prev = polygon[(i - 1) % len(polygon)]
+        nxt = polygon[(i + 1) % len(polygon)]
+        a = point - prev
+        b = nxt - point
+        scale = max(float(np.linalg.norm(a) * np.linalg.norm(b)), 1.0)
+        if cross2(a, b) < -tol * scale:
+            return False
+    return True
 
 
 def point_on_segment(point: np.ndarray, a: np.ndarray, b: np.ndarray, tol: float) -> bool:

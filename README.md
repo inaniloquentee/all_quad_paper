@@ -105,7 +105,7 @@ an additional engineering-quality gate.
 With the default sparse cap, the example commands still accept `--max-depth 7`,
 but the effective adaptive depth is chosen from the shortest discrete input
 segment and then increased only if required by topology, boundary conformance,
-or 2-ref compatibility. The current examples resolve to depth `4` for
+or 2-ref compatibility. The current examples resolve to depth `5` for
 `wobbly_loop` and depth `3` for `concave_polygon` and `box_with_hole`, keeping
 the boundary region readable while preserving the topology, boundary, and 2-ref
 checks.

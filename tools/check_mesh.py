@@ -3,9 +3,11 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from allquad.domain import load_polyline_domain, make_domain
+from allquad.domain import load_polyline_domain, make_domain, segment_parameters
 from allquad.mesher import AllQuadMesher, build_side_indices
 from allquad.quadtree import Quadtree
 
@@ -28,6 +30,7 @@ def main() -> None:
     by_region = mesh.quality_by_region()
     topology = mesh.topology(domain.sdf)
     two_ref = check_two_ref(domain, mesher) if args.adaptive else {}
+    boundary = check_boundary_conformance(mesh, domain) if args.adaptive else {}
 
     assert quality["quads"] > 0
     assert by_region["interior"]["quads"] > 0
@@ -35,6 +38,9 @@ def main() -> None:
     assert quality["min_area"] > 0.0
     assert topology["nonmanifold_edges"] == 0.0
     assert topology["interface_edges"] > 0
+    if boundary:
+        assert boundary["interface_edges_not_on_input_segment"] == 0
+        assert boundary["non_interface_edges_crossing_boundary"] == 0
     if args.enforce_angle_bounds:
         assert quality["max_angle"] <= args.max_angle
         assert quality["min_angle"] >= args.min_angle
@@ -52,6 +58,7 @@ def main() -> None:
         "quality_by_region": by_region,
         "topology": topology,
         "two_ref": two_ref,
+        "boundary": boundary,
     }
     Path("outputs").mkdir(exist_ok=True)
     name = Path(args.input_json).stem if args.input_json else args.domain
@@ -94,6 +101,72 @@ def check_two_ref(domain, mesher: AllQuadMesher) -> dict:
         result["shortest_segment"] = float(domain.min_segment_length())
         result["min_leaf_over_shortest_segment"] = result["min_leaf_size"] / result["shortest_segment"]
     return result
+
+
+def check_boundary_conformance(mesh, domain) -> dict:
+    if not hasattr(domain, "iter_segments"):
+        return {}
+
+    points = np.asarray(mesh.vertices, dtype=float)
+    edge_regions = {}
+    for quad, region in zip(mesh.quads, mesh.regions):
+        for i, a in enumerate(quad):
+            b = quad[(i + 1) % 4]
+            edge = (a, b) if a < b else (b, a)
+            edge_regions.setdefault(edge, set()).add(region)
+
+    interface_bad = 0
+    crossing_bad = 0
+    interface_edges = 0
+    for (a, b), regions in edge_regions.items():
+        p = points[a]
+        q = points[b]
+        is_interface = regions == {-1, 1}
+        if is_interface:
+            interface_edges += 1
+            if not edge_lies_on_input_segment(p, q, domain):
+                interface_bad += 1
+            continue
+        if edge_crosses_input_boundary(p, q, domain):
+            crossing_bad += 1
+
+    return {
+        "interface_edges": interface_edges,
+        "interface_edges_not_on_input_segment": interface_bad,
+        "non_interface_edges_crossing_boundary": crossing_bad,
+    }
+
+
+def edge_lies_on_input_segment(p: np.ndarray, q: np.ndarray, domain, tol: float = 1.0e-8) -> bool:
+    for _loop_id, _edge_id, a, b in domain.iter_segments():
+        ab = b - a
+        length = float(np.linalg.norm(ab))
+        if length <= tol:
+            continue
+        ap = p - a
+        aq = q - a
+        cross_p = abs(float(ab[0] * ap[1] - ab[1] * ap[0])) / length
+        cross_q = abs(float(ab[0] * aq[1] - ab[1] * aq[0])) / length
+        if cross_p > tol or cross_q > tol:
+            continue
+        scale = float(np.dot(ab, ab))
+        tp = float(np.dot(ap, ab) / scale)
+        tq = float(np.dot(aq, ab) / scale)
+        if -tol <= tp <= 1.0 + tol and -tol <= tq <= 1.0 + tol:
+            return True
+    return False
+
+
+def edge_crosses_input_boundary(p: np.ndarray, q: np.ndarray, domain, tol: float = 1.0e-10) -> bool:
+    r = q - p
+    for _loop_id, _edge_id, a, b in domain.iter_segments():
+        hit = segment_parameters(p, r, a, b - a)
+        if hit is None:
+            continue
+        t, u = hit
+        if tol < t < 1.0 - tol and -tol <= u <= 1.0 + tol:
+            return True
+    return False
 
 
 if __name__ == "__main__":

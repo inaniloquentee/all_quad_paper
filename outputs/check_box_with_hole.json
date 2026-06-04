@@ -15,24 +15,24 @@
     ]
   },
   "quality": {
-    "vertices": 509.0,
+    "vertices": 507.0,
     "quads": 464.0,
     "min_angle": 28.232103402344702,
     "max_angle": 151.7678965976553,
     "min_edge_ratio": 0.08380731193498801,
-    "avg_edge_ratio": 0.5843483015398688,
-    "min_area": 0.0005139671742551144,
+    "avg_edge_ratio": 0.5858732622848762,
+    "min_area": 0.0009250476820644171,
     "max_area": 0.04025008104647432
   },
   "quality_by_region": {
     "interior": {
-      "vertices": 298.0,
+      "vertices": 296.0,
       "quads": 238.0,
       "min_angle": 28.232103402344702,
       "max_angle": 151.7678965976553,
-      "min_edge_ratio": 0.24555156849831306,
-      "avg_edge_ratio": 0.6008504627644274,
-      "min_area": 0.0005139671742551144,
+      "min_edge_ratio": 0.2373352824887421,
+      "avg_edge_ratio": 0.603823495477383,
+      "min_area": 0.0009250476820644171,
       "max_area": 0.027400145542932186
     },
     "exterior": {
@@ -65,5 +65,10 @@
     "max_leaf_size": 0.31000000000000005,
     "shortest_segment": 0.33105890714493696,
     "min_leaf_over_shortest_segment": 0.9363892446617743
+  },
+  "boundary": {
+    "interface_edges": 92,
+    "interface_edges_not_on_input_segment": 0,
+    "non_interface_edges_crossing_boundary": 0
   }
 }
