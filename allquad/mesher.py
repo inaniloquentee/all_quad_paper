@@ -392,12 +392,16 @@ class AllQuadMesher:
             loop_id, vertex_id = vertices[0]
             vertex = self.domain.loops[loop_id][vertex_id]
             x0, _y0, x1, _y1 = tree.bounds(cell)
-            distance = 0.125 * (x1 - x0)
+            size = x1 - x0
+            distance = 0.125 * size
+            clearance = self.clearance_ratio * size
             for key in self._vertex_side_midpoint_keys(tree, cell):
                 point = moved_points.get(key, np.array(key, dtype=float))
                 if np.linalg.norm(point - vertex) <= self.tol:
                     continue
-                moved_points[key] = move_toward(point, vertex, distance)
+                pulled = move_toward(point, vertex, distance)
+                # Fig. 6 side midpoints are mesh points too; keep the paper clearance after pulling them.
+                moved_points[key] = self.domain.repel(pulled, clearance, mode=self.repelling)
 
     def _cell_side_curve_hits(self, bounds: Bounds) -> set[int]:
         if not hasattr(self.domain, "iter_segments"):
