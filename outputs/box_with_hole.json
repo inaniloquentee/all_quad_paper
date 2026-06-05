@@ -1,71 +1,44 @@
 {
-  "settings": {
-    "effective_depth": 3,
-    "sparse_attempts": [
-      {
-        "ok": true,
-        "quads": 464.0,
-        "min_angle": 28.232103402344702,
-        "max_angle": 151.7678965976553,
-        "nonmanifold_edges": 0.0,
-        "interface_edges": 92.0,
-        "max_interface_midpoint_error": 2.7755575615628914e-16,
-        "paper_quadtree_ok": true,
-        "strong_balance_bad_pairs": 0.0,
-        "multi_vertex_cells": 0.0,
-        "disjoint_multi_curve_cells": 0.0,
-        "depth": 3.0
-      }
-    ]
-  },
   "quality": {
-    "vertices": 507.0,
-    "quads": 464.0,
-    "min_angle": 28.232103402344702,
-    "max_angle": 151.7678965976553,
-    "min_edge_ratio": 0.08380731193498801,
-    "avg_edge_ratio": 0.5858732622848762,
-    "min_area": 0.0009250476820644171,
-    "max_area": 0.04025008104647432
+    "vertices": 11371.0,
+    "quads": 11304.0,
+    "min_angle": 26.603147499457926,
+    "max_angle": 160.36153536777468,
+    "min_edge_ratio": 0.01985812861206301,
+    "avg_edge_ratio": 0.6469573173832007,
+    "min_area": 2.5301694606405523e-06,
+    "max_area": 0.009009375000000208
   },
   "quality_by_region": {
     "interior": {
-      "vertices": 296.0,
-      "quads": 238.0,
-      "min_angle": 28.232103402344702,
-      "max_angle": 151.7678965976553,
-      "min_edge_ratio": 0.2373352824887421,
-      "avg_edge_ratio": 0.603823495477383,
-      "min_area": 0.0009250476820644171,
-      "max_area": 0.027400145542932186
+      "vertices": 6225.0,
+      "quads": 5661.0,
+      "min_angle": 26.603147499458252,
+      "max_angle": 160.36153536777468,
+      "min_edge_ratio": 0.048024679385560085,
+      "avg_edge_ratio": 0.6399969665541217,
+      "min_area": 2.5301694606405523e-06,
+      "max_area": 0.006006250000000102
     },
     "exterior": {
-      "vertices": 303.0,
-      "quads": 226.0,
-      "min_angle": 28.232103402344734,
-      "max_angle": 151.7678965976553,
-      "min_edge_ratio": 0.08380731193498801,
-      "avg_edge_ratio": 0.5669699193653336,
-      "min_area": 0.001988727912672017,
-      "max_area": 0.04025008104647432
+      "vertices": 6254.0,
+      "quads": 5643.0,
+      "min_angle": 26.603147499457926,
+      "max_angle": 153.3968525005418,
+      "min_edge_ratio": 0.01985812861206301,
+      "avg_edge_ratio": 0.6539398702882896,
+      "min_area": 5.998551323382895e-06,
+      "max_area": 0.009009375000000208
     }
   },
   "topology": {
-    "edges": 1002.0,
-    "boundary_edges": 148.0,
+    "edges": 22714.0,
+    "boundary_edges": 212.0,
     "nonmanifold_edges": 0.0,
-    "interface_edges": 92.0,
-    "max_interface_midpoint_error": 2.7755575615628914e-16,
-    "avg_interface_midpoint_error": 4.762490463185337e-17,
+    "interface_edges": 1108.0,
+    "max_interface_midpoint_error": 3.3306690738754696e-16,
+    "avg_interface_midpoint_error": 3.6592223060690494e-17,
     "max_interface_endpoint_error": 2.220446049250313e-16,
-    "avg_interface_endpoint_error": 2.5012460838389672e-17
-  },
-  "paper_quadtree": {
-    "ok": true,
-    "strong_balance_bad_pairs": 0.0,
-    "max_touching_level_delta": 0.0,
-    "multi_vertex_cells": 0.0,
-    "multi_curve_cells": 10.0,
-    "disjoint_multi_curve_cells": 0.0
+    "avg_interface_endpoint_error": 2.850587566228962e-17
   }
 }

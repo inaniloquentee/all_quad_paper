@@ -69,15 +69,6 @@ Useful parameters:
 - `--repelling axis`: move horizontally/vertically, as in Fig. 4(c).
 - `--clearance-ratio 0.25`: paper value `D = s / 4`.
 - `--max-depth`: background grid resolution.
-- `--sparse-boundary-ratio 1.0`: in adaptive polyline mode, target the effective
-  boundary depth from the shortest input segment instead of refining every
-  boundary cell to `--max-depth`. The mesher starts with the dyadic cell size
-  closest to this target and only refines further if topology, boundary
-  conformance, or 2-ref compatibility fails.
-- `--dense-boundary`: disable the shortest-segment sparse cap and use the full
-  requested adaptive boundary depth.
-- `--quality-relaxation`: optionally enable a non-paper local relaxation pass
-  that moves free non-boundary vertices toward stricter angle targets.
 - `--inside-only`: omit the exterior mesh if you only want the old one-sided
   output.
 - `--domain circle`: use a built-in analytic demo instead of `--input-json`.
@@ -89,30 +80,18 @@ Useful parameters:
 ```powershell
 python -m compileall allquad tools
 python tools/check_mesh.py --input-json examples/concave_polygon.json --max-depth 5
-python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7
-python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7
-python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7
+python tools/check_mesh.py --input-json examples/concave_polygon.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
+python tools/check_mesh.py --input-json examples/wobbly_loop.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
+python tools/check_mesh.py --input-json examples/box_with_hole.json --adaptive --max-depth 7 --min-angle 24 --max-angle 170
 ```
 
 The check asserts that the output is all-quadrilateral, has positive areas, has
-both interior and exterior elements, has no nonmanifold edges, and that detected
-geometry-boundary edges are present and lie on the original discrete polyline
-boundary to floating point tolerance. Angles are reported for comparison with
-the paper, but they are not used by the default paper-flow regression check.
-Pass `--enforce-angle-bounds` with `--min-angle` and `--max-angle` if you want
-an additional engineering-quality gate.
-
-With the default sparse cap, the example commands still accept `--max-depth 7`,
-but the effective adaptive depth is chosen from the shortest discrete input
-segment and then increased only if required by topology, boundary conformance,
-or 2-ref compatibility. The current examples resolve to depth `5` for
-`wobbly_loop` and depth `3` for `concave_polygon` and `box_with_hole`, keeping
-the boundary region readable while preserving the topology, boundary, and 2-ref
-checks.
-
-The default adaptive path is cleanup-free: after the paper templates are
-applied, no smoothing or angle-relaxation pass is run. `--quality-relaxation` is
-kept as an opt-in engineering aid only, not as part of the paper reproduction.
+both interior and exterior elements, has no nonmanifold edges, has no degenerate
+angles outside the configured quality range, and that detected geometry-boundary
+edges are present and lie on the original discrete polyline boundary to floating
+point tolerance. The default regression range is `15` to `165` degrees; the
+adaptive polyline examples are checked with a paper-aligned sharp-feature guard:
+minimum angle at least `24` degrees and maximum angle at most `170` degrees.
 
 ## Notes on fidelity
 
@@ -125,13 +104,9 @@ polyline vertex is inserted, adjacent curve hits are connected through that
 vertex, non-intersected side midpoints are pulled toward the vertex by `s / 8`,
 and auxiliary edge spokes are selected using the actual midpoint-subdivision
 points used by the final mesh. This keeps the interior/exterior interface on the
-original discrete boundary instead of on analytic SDF chords. Vertex-chain
-parents are labelled from the oriented input loop, so concave vertex cells do
-not fall back to a straight SDF chord between neighboring boundary hits.
+original discrete boundary instead of on analytic SDF chords.
 
 Adaptive transitions now use the paper's two-refinement (2-ref) templates for
 coarse/fine interfaces. The quadtree is refined until every empty adaptive cell
 has at most one hanging node on each side, then the Fig. 7 templates are applied
-with checkerboard corner marking. The regression checker reports this invariant
-explicitly, along with the ratio between the smallest leaf size and the shortest
-input segment.
+with checkerboard corner marking.

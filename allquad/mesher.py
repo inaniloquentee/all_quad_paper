@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import math
+from dataclasses import dataclass
+from itertools import combinations
 from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 
-from .domain import SDFDomain, cross2, segment_parameters
-from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_area, polygon_centroid
-from .quadtree import Cell, Quadtree, boxes_touch, children, round_point
+from .domain import SDFDomain, segment_parameters
+from .mesh import Mesh, clean_polygon, midpoint_subdivision_center, polygon_centroid
+from .quadtree import Cell, Quadtree, children, round_point
 
 
 Point = Tuple[float, float]
@@ -38,58 +38,17 @@ class AllQuadMesher:
     tol: float = 1.0e-10
     include_exterior: bool = True
     adaptive: bool = False
-    sparse_boundary: bool = True
-    sparse_boundary_ratio: float = 1.0
-    quality_relaxation: bool = False
-    quality_relaxation_iters: int = 8
-    last_effective_depth: int | None = field(default=None, init=False)
-    last_sparse_attempts: List[Dict[str, float | bool]] = field(default_factory=list, init=False)
-    last_quadtree: Quadtree | None = field(default=None, init=False, repr=False)
 
     def generate(self) -> Mesh:
-        self.last_sparse_attempts = []
-        if self._uses_sparse_polyline_depth():
-            start_depth = self._effective_max_depth()
-            last_mesh: Mesh | None = None
-            last_error: Exception | None = None
-            for depth in range(start_depth, self.max_depth + 1):
-                try:
-                    mesh = self._generate_at_depth(depth)
-                except ValueError as exc:
-                    last_error = exc
-                    self.last_sparse_attempts.append(
-                        {"ok": False, "depth": float(depth), "error": str(exc)}
-                    )
-                    continue
-                self.last_effective_depth = depth
-                report = self._sparse_requirement_report(mesh)
-                report["depth"] = float(depth)
-                self.last_sparse_attempts.append(report)
-                if report["ok"]:
-                    return mesh
-                last_mesh = mesh
-            if last_mesh is not None:
-                return last_mesh
-            if last_error is not None:
-                raise last_error
-
-        max_depth = self._effective_max_depth()
-        self.last_effective_depth = max_depth
-        return self._generate_at_depth(max_depth)
-
-    def _generate_at_depth(self, max_depth: int) -> Mesh:
-        min_depth = min(self.min_depth if self.adaptive else max_depth, max_depth)
-        sparse_boundary_size = self._sparse_boundary_size() if self.adaptive else None
+        min_depth = self.min_depth if self.adaptive else self.max_depth
         tree = Quadtree.build(
             self.domain,
             min_depth=min_depth,
-            max_depth=max_depth,
+            max_depth=self.max_depth,
             boundary_band=self.boundary_band,
-            sparse_boundary_size=sparse_boundary_size,
         )
         if self.adaptive:
-            self._refine_tree_for_2ref(tree, max_depth)
-        self.last_quadtree = tree
+            self._refine_tree_for_2ref(tree)
         base_points = tree.collect_corners()
         grid_points = base_points
         if self.adaptive:
@@ -141,150 +100,7 @@ class AllQuadMesher:
                     self._add_midpoint_subdivision(mesh, clipped, moved_points, moved_keys, region)
                 else:
                     mesh.add_midpoint_subdivision(clipped, region=region)
-        if self.adaptive and self.quality_relaxation:
-            self._relax_free_vertices(mesh)
         return mesh
-
-    def _uses_sparse_polyline_depth(self) -> bool:
-        return (
-            self.adaptive
-            and self.sparse_boundary
-            and hasattr(self.domain, "min_segment_length")
-            and self._sparse_boundary_size() is not None
-        )
-
-    def _sparse_requirement_report(self, mesh: Mesh) -> Dict[str, float | bool]:
-        quality = mesh.quality()
-        by_region = mesh.quality_by_region()
-        topology = mesh.topology(self.domain.sdf)
-        paper = self._paper_quadtree_report(self.last_quadtree)
-        ok = (
-            quality["quads"] > 0
-            and quality["min_area"] > 0.0
-            and topology["nonmanifold_edges"] == 0.0
-            and bool(paper["ok"])
-        )
-        if self.include_exterior:
-            ok = (
-                ok
-                and by_region.get("interior", {}).get("quads", 0.0) > 0.0
-                and by_region.get("exterior", {}).get("quads", 0.0) > 0.0
-                and topology.get("interface_edges", 0.0) > 0.0
-            )
-            midpoint_error = topology.get("max_interface_midpoint_error")
-            if midpoint_error is not None:
-                ok = ok and midpoint_error <= 1.0e-6
-            endpoint_error = topology.get("max_interface_endpoint_error")
-            if endpoint_error is not None:
-                ok = ok and endpoint_error <= 1.0e-6
-        else:
-            ok = ok and by_region.get("interior", {}).get("quads", 0.0) > 0.0
-
-        return {
-            "ok": bool(ok),
-            "quads": quality["quads"],
-            "min_angle": quality["min_angle"],
-            "max_angle": quality["max_angle"],
-            "nonmanifold_edges": topology["nonmanifold_edges"],
-            "interface_edges": topology.get("interface_edges", 0.0),
-            "max_interface_midpoint_error": topology.get("max_interface_midpoint_error", 0.0),
-            "paper_quadtree_ok": bool(paper["ok"]),
-            "strong_balance_bad_pairs": paper["strong_balance_bad_pairs"],
-            "multi_vertex_cells": paper["multi_vertex_cells"],
-            "disjoint_multi_curve_cells": paper["disjoint_multi_curve_cells"],
-        }
-
-    def _paper_quadtree_report(self, tree: Quadtree | None) -> Dict[str, float | bool]:
-        if tree is None:
-            return {
-                "ok": True,
-                "strong_balance_bad_pairs": 0.0,
-                "max_touching_level_delta": 0.0,
-                "multi_vertex_cells": 0.0,
-                "multi_curve_cells": 0.0,
-                "disjoint_multi_curve_cells": 0.0,
-            }
-
-        cells = sorted(tree.leaves)
-        strong_balance_bad_pairs = 0
-        max_touching_level_delta = 0
-        for index, first in enumerate(cells):
-            first_bounds = tree.bounds(first)
-            for second in cells[index + 1 :]:
-                if not boxes_touch(first_bounds, tree.bounds(second)):
-                    continue
-                delta = abs(first.level - second.level)
-                max_touching_level_delta = max(max_touching_level_delta, delta)
-                if delta > 1:
-                    strong_balance_bad_pairs += 1
-
-        multi_vertex_cells = 0
-        multi_curve_cells = 0
-        disjoint_multi_curve_cells = 0
-        if hasattr(self.domain, "segments_in_box") and hasattr(self.domain, "vertices_in_box"):
-            for cell in cells:
-                bounds = tree.bounds(cell)
-                vertices = self.domain.vertices_in_box(bounds, self.tol)
-                if len(vertices) > 1:
-                    multi_vertex_cells += 1
-                segments = self.domain.segments_in_box(bounds, self.tol)
-                if len(segments) <= 1:
-                    continue
-                multi_curve_cells += 1
-                if not self._polyline_multicurve_cell_is_paper_exception(segments, vertices):
-                    disjoint_multi_curve_cells += 1
-
-        ok = (
-            strong_balance_bad_pairs == 0
-            and multi_vertex_cells == 0
-            and disjoint_multi_curve_cells == 0
-        )
-        return {
-            "ok": bool(ok),
-            "strong_balance_bad_pairs": float(strong_balance_bad_pairs),
-            "max_touching_level_delta": float(max_touching_level_delta),
-            "multi_vertex_cells": float(multi_vertex_cells),
-            "multi_curve_cells": float(multi_curve_cells),
-            "disjoint_multi_curve_cells": float(disjoint_multi_curve_cells),
-        }
-
-    def _polyline_multicurve_cell_is_paper_exception(
-        self,
-        segments: Iterable[Tuple[int, int]],
-        vertices: Iterable[Tuple[int, int]],
-    ) -> bool:
-        segment_set = set(segments)
-        vertex_list = list(vertices)
-        if not hasattr(self.domain, "incident_segments"):
-            return False
-        for loop_id, vertex_id in vertex_list:
-            if segment_set.issubset(self.domain.incident_segments(loop_id, vertex_id)):
-                return True
-        if not hasattr(self.domain, "loops"):
-            return False
-        for loop_id, loop in enumerate(self.domain.loops):
-            for vertex_id in range(len(loop)):
-                if segment_set.issubset(self.domain.incident_segments(loop_id, vertex_id)):
-                    return True
-        return False
-
-    def _sparse_boundary_size(self) -> float | None:
-        if not self.sparse_boundary or not hasattr(self.domain, "min_segment_length"):
-            return None
-        return float(self.domain.min_segment_length()) * self.sparse_boundary_ratio
-
-    def _effective_max_depth(self) -> int:
-        if not self.adaptive:
-            return self.max_depth
-        sparse_boundary_size = self._sparse_boundary_size()
-        if sparse_boundary_size is None or sparse_boundary_size <= 0.0:
-            return self.max_depth
-        xmin, ymin, xmax, ymax = self.domain.bounds
-        span = max(xmax - xmin, ymax - ymin)
-        if span <= 0.0:
-            return self.max_depth
-        sparse_depth = int(math.ceil(math.log2(span / sparse_boundary_size)))
-        return max(self.min_depth, min(self.max_depth, sparse_depth))
 
     def _augment_points_for_2ref(self, tree: Quadtree, points: set[Point]) -> set[Point]:
         closed, bad_cells = self._closed_2ref_points(tree, set(points))
@@ -292,24 +108,18 @@ class AllQuadMesher:
             raise ValueError("quadtree still has multi-node 2-ref sides after preprocessing")
         return closed
 
-    def _refine_tree_for_2ref(self, tree: Quadtree, max_depth: int) -> None:
-        max_refinement_rounds = max(64, (4**max_depth - 1) // 3 + 1)
-        for _iteration in range(max_refinement_rounds):
+    def _refine_tree_for_2ref(self, tree: Quadtree) -> None:
+        for _iteration in range(self.max_depth + 2):
             _points, bad_cells = self._closed_2ref_points(tree, tree.collect_corners())
             if not bad_cells:
                 return
-            refinable = {cell for cell in bad_cells if cell.level < max_depth}
+            refinable = {cell for cell in bad_cells if cell.level < self.max_depth}
             if not refinable:
                 raise ValueError("2-ref interface has multiple hanging nodes at max depth")
             tree.leaves.difference_update(refinable)
             for cell in refinable:
                 tree.leaves.update(children(cell))
-            tree.refine_until_conforming(
-                self.domain,
-                self.boundary_band,
-                max_depth,
-                self._sparse_boundary_size(),
-            )
+            tree.refine_until_conforming(self.domain, self.boundary_band, self.max_depth)
         raise ValueError("could not make quadtree compatible with 2-ref templates")
 
     def _closed_2ref_points(self, tree: Quadtree, points: set[Point]) -> Tuple[set[Point], set[Cell]]:
@@ -475,16 +285,12 @@ class AllQuadMesher:
             loop_id, vertex_id = vertices[0]
             vertex = self.domain.loops[loop_id][vertex_id]
             x0, _y0, x1, _y1 = tree.bounds(cell)
-            size = x1 - x0
-            distance = 0.125 * size
-            clearance = self.clearance_ratio * size
+            distance = 0.125 * (x1 - x0)
             for key in self._vertex_side_midpoint_keys(tree, cell):
                 point = moved_points.get(key, np.array(key, dtype=float))
                 if np.linalg.norm(point - vertex) <= self.tol:
                     continue
-                pulled = move_toward(point, vertex, distance)
-                # Fig. 6 side midpoints are mesh points too; keep the paper clearance after pulling them.
-                moved_points[key] = self.domain.repel(pulled, clearance, mode=self.repelling)
+                moved_points[key] = move_toward(point, vertex, distance)
 
     def _cell_side_curve_hits(self, bounds: Bounds) -> set[int]:
         if not hasattr(self.domain, "iter_segments"):
@@ -623,159 +429,6 @@ class AllQuadMesher:
         center = np.mean(quad, axis=0)
         return -1 if float(self.domain.sdf(center)) <= 0.0 else 1
 
-    def _relax_free_vertices(self, mesh: Mesh) -> None:
-        if not mesh.quads:
-            return
-        points = np.asarray(mesh.vertices, dtype=float).copy()
-        incident: Dict[int, List[int]] = {}
-        neighbors: Dict[int, set[int]] = {}
-        edge_use: Dict[Tuple[int, int], int] = {}
-        for quad_id, quad in enumerate(mesh.quads):
-            for i, vertex_id in enumerate(quad):
-                incident.setdefault(vertex_id, []).append(quad_id)
-                neighbors.setdefault(vertex_id, set()).update({quad[(i - 1) % 4], quad[(i + 1) % 4]})
-                a = vertex_id
-                b = quad[(i + 1) % 4]
-                edge = (a, b) if a < b else (b, a)
-                edge_use[edge] = edge_use.get(edge, 0) + 1
-
-        distances = np.abs(np.asarray(self.domain.sdf(points), dtype=float))
-        fixed = distances <= 1.0e-9
-        for edge, count in edge_use.items():
-            if count == 1:
-                if distances[edge[0]] > 0.05:
-                    fixed[edge[0]] = True
-                if distances[edge[1]] > 0.05:
-                    fixed[edge[1]] = True
-
-        vertex_regions: Dict[int, set[int]] = {}
-        for quad_id, quad in enumerate(mesh.quads):
-            region = mesh.regions[quad_id]
-            for vertex_id in quad:
-                vertex_regions.setdefault(vertex_id, set()).add(region)
-
-        for _iteration in range(max(self.quality_relaxation_iters, 0)):
-            bad_vertices = self._bad_angle_vertices(mesh, points)
-            changed = 0
-            for vertex_id in sorted(bad_vertices):
-                if fixed[vertex_id] or not neighbors.get(vertex_id):
-                    continue
-                if len(vertex_regions.get(vertex_id, set())) > 1:
-                    continue
-                current = points[vertex_id].copy()
-                base_score = self._local_relaxation_score(mesh, points, incident[vertex_id])
-                candidates = self._relaxation_candidates(
-                    points,
-                    vertex_id,
-                    neighbors[vertex_id],
-                    incident[vertex_id],
-                    mesh,
-                )
-                best = current
-                best_score = base_score
-                for candidate in candidates:
-                    if not self._candidate_stays_in_region(candidate, vertex_regions.get(vertex_id, set())):
-                        continue
-                    old = points[vertex_id].copy()
-                    points[vertex_id] = candidate
-                    score = self._local_relaxation_score(mesh, points, incident[vertex_id])
-                    points[vertex_id] = old
-                    if score < best_score:
-                        best = candidate
-                        best_score = score
-                if best_score < base_score:
-                    points[vertex_id] = best
-                    changed += 1
-            if changed == 0:
-                break
-
-        mesh.vertices = [points[i].copy() for i in range(len(mesh.vertices))]
-
-    def _bad_angle_vertices(self, mesh: Mesh, points: np.ndarray) -> set[int]:
-        bad: set[int] = set()
-        for quad in mesh.quads:
-            polygon = points[list(quad)]
-            angles = quad_angles(polygon, self.tol)
-            if angles and (min(angles) < 30.0 or max(angles) > 150.0):
-                bad.update(quad)
-        return bad
-
-    def _local_relaxation_score(self, mesh: Mesh, points: np.ndarray, quad_ids: List[int]) -> Tuple[float, float, float, float]:
-        min_angle = float("inf")
-        max_angle = -float("inf")
-        min_area = float("inf")
-        for quad_id in quad_ids:
-            polygon = points[list(mesh.quads[quad_id])]
-            area = polygon_area(polygon)
-            if area <= self.tol * self.tol:
-                return (float("inf"), float("inf"), float("inf"), float("inf"))
-            angles = quad_angles(polygon, self.tol)
-            if not angles:
-                return (float("inf"), float("inf"), float("inf"), float("inf"))
-            min_angle = min(min_angle, min(angles))
-            max_angle = max(max_angle, max(angles))
-            min_area = min(min_area, area)
-        violation = max(30.0 - min_angle, max_angle - 150.0, 0.0)
-        return (violation, -min_angle, max_angle, -min_area)
-
-    def _relaxation_candidates(
-        self,
-        points: np.ndarray,
-        vertex_id: int,
-        neighbors: set[int],
-        quad_ids: List[int],
-        mesh: Mesh,
-    ) -> List[np.ndarray]:
-        current = points[vertex_id]
-        neighbor_points = [points[neighbor] for neighbor in neighbors]
-        average = np.mean(neighbor_points, axis=0)
-        scale = float(np.mean([np.linalg.norm(current - point) for point in neighbor_points]))
-        if scale <= self.tol:
-            return []
-
-        candidates: List[np.ndarray] = []
-        for alpha in (0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0):
-            candidates.append((1.0 - alpha) * current + alpha * average)
-
-        directions = [
-            np.array([1.0, 0.0]),
-            np.array([-1.0, 0.0]),
-            np.array([0.0, 1.0]),
-            np.array([0.0, -1.0]),
-        ]
-        toward_average = average - current
-        if np.linalg.norm(toward_average) > self.tol:
-            directions.append(toward_average / np.linalg.norm(toward_average))
-        for neighbor in neighbors:
-            direction = points[neighbor] - current
-            length = np.linalg.norm(direction)
-            if length > self.tol:
-                unit = direction / length
-                directions.append(unit)
-                directions.append(np.array([-unit[1], unit[0]], dtype=float))
-                directions.append(np.array([unit[1], -unit[0]], dtype=float))
-        for quad_id in quad_ids:
-            center = np.mean(points[list(mesh.quads[quad_id])], axis=0)
-            direction = center - current
-            length = np.linalg.norm(direction)
-            if length > self.tol:
-                directions.append(direction / length)
-
-        for direction in directions:
-            for step in (0.02, 0.05, 0.1, 0.2, 0.35):
-                candidates.append(current + direction * scale * step)
-        return candidates
-
-    def _candidate_stays_in_region(self, candidate: np.ndarray, regions: set[int] | None) -> bool:
-        if not regions:
-            return True
-        value = float(self.domain.sdf(candidate))
-        if regions == {-1}:
-            return value < -self.tol
-        if regions == {1}:
-            return value > self.tol
-        return False
-
     def _add_2ref_template(
         self,
         mesh: Mesh,
@@ -903,6 +556,8 @@ class AllQuadMesher:
         result = self._classify_polyline_pieces(pieces)
         if len(result) < 2 or len({region for _poly, region in result}) <= 1:
             return []
+        if not self._midpoint_pieces_are_usable(result):
+            return []
         return result
 
     def _split_polyline_single_segment_cell(
@@ -929,7 +584,7 @@ class AllQuadMesher:
         for poly in split:
             if len(poly) < 3:
                 continue
-            region = -1 if float(self.domain.sdf(representative_point(poly, self.tol))) <= 0.0 else 1
+            region = -1 if float(self.domain.sdf(polygon_centroid(poly))) <= 0.0 else 1
             if region < 0 or self.include_exterior:
                 pieces.append((poly, region))
         if len(pieces) < 2:
@@ -964,12 +619,8 @@ class AllQuadMesher:
         if np.linalg.norm(in_hit[0] - out_hit[0]) <= self.tol:
             return []
 
-        result = self._sharp_parent_regions(polygon, vertex, in_hit, out_hit)
-        result = [
-            (poly, region)
-            for poly, region in result
-            if region < 0 or self.include_exterior
-        ]
+        pieces = split_polygon_by_chain(polygon, in_hit, [in_hit[0], vertex, out_hit[0]], out_hit, self.tol)
+        result = self._classify_polyline_pieces(pieces)
         if len(result) < 2 or len({region for _poly, region in result}) <= 1:
             return []
         return result
@@ -1030,43 +681,74 @@ class AllQuadMesher:
             ]
             children = split_polygon_by_vertex_spokes(parent, vertex, local_points, self.tol)
             for poly in children:
-                for piece in self._decompose_vertex_piece(poly, vertex):
-                    if len(piece) >= 3:
-                        pieces.append((piece, region))
+                if len(poly) >= 3:
+                    pieces.append((poly, region))
 
-        return pieces
+        if self._midpoint_pieces_are_usable(
+            pieces,
+            require_region_consistency=True,
+            moved_points=moved_points,
+            moved_keys=moved_keys,
+        ):
+            return pieces
 
-    def _decompose_vertex_piece(self, polygon: np.ndarray, vertex: np.ndarray) -> List[np.ndarray]:
-        poly = clean_polygon(polygon, self.tol)
-        if len(poly) <= 3 or polygon_is_convex(poly, self.tol):
-            return [poly]
+        searched = self._search_vertex_spoke_template(
+            polygon,
+            vertex,
+            in_hit,
+            out_hit,
+            parent_regions,
+            moved_points,
+            moved_keys,
+        )
+        if searched:
+            return searched
+        return []
 
-        vertex_index = find_point_index(list(poly), vertex, self.tol)
-        if vertex_index is None:
-            return [poly]
+    def _search_vertex_spoke_template(
+        self,
+        polygon: np.ndarray,
+        vertex: np.ndarray,
+        in_hit: Tuple[np.ndarray, int, float],
+        out_hit: Tuple[np.ndarray, int, float],
+        parent_regions: List[Tuple[np.ndarray, int]],
+        moved_points: Dict[Point, np.ndarray],
+        moved_keys: Dict[Tuple[int, int], Point],
+    ) -> List[Tuple[np.ndarray, int]]:
+        base_hits = [(in_hit[0], in_hit[1], in_hit[2]), (out_hit[0], out_hit[1], out_hit[2])]
+        candidates = self._vertex_spoke_candidates(polygon, vertex, base_hits)
+        best: Tuple[float, float, int, List[Tuple[np.ndarray, int]]] | None = None
 
-        edge_midpoints: List[np.ndarray] = []
-        for i, point in enumerate(poly):
-            next_index = (i + 1) % len(poly)
-            if i == vertex_index or next_index == vertex_index:
-                continue
-            nxt = poly[next_index]
-            if np.linalg.norm(nxt - point) > self.tol:
-                edge_midpoints.append(0.5 * (point + nxt))
+        for count in range(0, min(2, len(candidates)) + 1):
+            for extra in combinations(candidates, count):
+                if len({edge_id for _point, edge_id, _u in extra}) != len(extra):
+                    continue
+                polygons = split_polygon_by_spokes(polygon, vertex, base_hits + list(extra), self.tol)
+                pieces: List[Tuple[np.ndarray, int]] = []
+                for poly in polygons:
+                    if len(poly) < 3:
+                        continue
+                    region = self._sharp_piece_region(poly, parent_regions)
+                    if region < 0 or self.include_exterior:
+                        pieces.append((poly, region))
+                if len(pieces) < 2 or len({region for _poly, region in pieces}) <= 1:
+                    continue
+                bounds = self._midpoint_piece_angle_bounds(
+                    pieces,
+                    require_region_consistency=True,
+                    moved_points=moved_points,
+                    moved_keys=moved_keys,
+                )
+                if bounds is None:
+                    continue
+                min_angle, max_angle = bounds
+                if min_angle < 15.0 or max_angle > 175.0:
+                    continue
+                score = (min_angle, -max_angle, -count)
+                if best is None or score > (best[0], best[1], best[2]):
+                    best = (min_angle, -max_angle, -count, pieces)
 
-        split = split_polygon_by_vertex_spokes(poly, vertex, edge_midpoints, self.tol)
-        if len(split) > 1:
-            pieces = [piece for piece in split if len(piece) >= 3]
-            if pieces and all(len(piece) <= 3 or polygon_is_convex(piece, self.tol) for piece in pieces):
-                return pieces
-
-        ordered = list(poly[vertex_index:]) + list(poly[:vertex_index])
-        pieces: List[np.ndarray] = []
-        for i in range(1, len(ordered) - 1):
-            tri = clean_polygon([ordered[0], ordered[i], ordered[i + 1]], self.tol)
-            if len(tri) == 3:
-                pieces.append(tri)
-        return pieces or [poly]
+        return [] if best is None else best[3]
 
     def _side_point_belongs_to_parent(
         self,
@@ -1105,6 +787,26 @@ class AllQuadMesher:
                 continue
             points.append((point, side, 0.5))
         return points
+
+    def _vertex_spoke_candidates(
+        self,
+        polygon: np.ndarray,
+        vertex: np.ndarray,
+        base_hits: List[Tuple[np.ndarray, int, float]],
+    ) -> List[Tuple[np.ndarray, int, float]]:
+        fractions = (0.05, 0.10, 0.30, 0.45, 0.50, 0.70, 0.75, 0.90)
+        candidates: List[Tuple[np.ndarray, int, float]] = []
+        base_points = [point for point, _edge_id, _u in base_hits]
+        for edge_id, a in enumerate(polygon):
+            b = polygon[(edge_id + 1) % len(polygon)]
+            for u in fractions:
+                point = a + u * (b - a)
+                if np.linalg.norm(point - vertex) <= self.tol:
+                    continue
+                if any(np.linalg.norm(point - existing) <= self.tol for existing in base_points):
+                    continue
+                candidates.append((point, edge_id, u))
+        return candidates
 
     def _polyline_vertices_in_polygon(
         self,
@@ -1145,7 +847,7 @@ class AllQuadMesher:
         for poly in pieces:
             if len(poly) < 3:
                 continue
-            region = -1 if float(self.domain.sdf(representative_point(poly, self.tol))) <= 0.0 else 1
+            region = -1 if float(self.domain.sdf(polygon_centroid(poly))) <= 0.0 else 1
             if region < 0 or self.include_exterior:
                 result.append((poly, region))
         return result
@@ -1158,22 +860,71 @@ class AllQuadMesher:
         out_hit: Tuple[np.ndarray, int, float],
     ) -> List[Tuple[np.ndarray, int]]:
         parents = split_polygon_by_chain(polygon, in_hit, [in_hit[0], vertex, out_hit[0]], out_hit, self.tol)
-        if len(parents) != 2:
-            return []
-        outside_parent, inside_parent = parents
         regions: List[Tuple[np.ndarray, int]] = []
-        if len(outside_parent) >= 3:
-            regions.append((outside_parent, 1))
-        if len(inside_parent) >= 3:
-            regions.append((inside_parent, -1))
+        for parent in parents:
+            if len(parent) < 3:
+                continue
+            region = -1 if float(self.domain.sdf(polygon_centroid(parent))) <= 0.0 else 1
+            regions.append((parent, region))
         return regions
 
     def _sharp_piece_region(self, polygon: np.ndarray, parent_regions: List[Tuple[np.ndarray, int]]) -> int:
-        center = representative_point(polygon, self.tol)
+        center = polygon_centroid(polygon)
         for parent, region in parent_regions:
             if point_in_polygon(center, parent, self.tol):
                 return region
         return -1 if float(self.domain.sdf(center)) <= 0.0 else 1
+
+    def _midpoint_pieces_are_usable(
+        self,
+        pieces: List[Tuple[np.ndarray, int]],
+        require_region_consistency: bool = False,
+        moved_points: Dict[Point, np.ndarray] | None = None,
+        moved_keys: Dict[Tuple[int, int], Point] | None = None,
+    ) -> bool:
+        bounds = self._midpoint_piece_angle_bounds(
+            pieces,
+            require_region_consistency=require_region_consistency,
+            moved_points=moved_points,
+            moved_keys=moved_keys,
+        )
+        if bounds is None:
+            return False
+        min_angle, max_angle = bounds
+        return min_angle >= 15.0 and max_angle <= 175.0
+
+    def _midpoint_piece_angle_bounds(
+        self,
+        pieces: List[Tuple[np.ndarray, int]],
+        require_region_consistency: bool = False,
+        moved_points: Dict[Point, np.ndarray] | None = None,
+        moved_keys: Dict[Tuple[int, int], Point] | None = None,
+    ) -> Tuple[float, float] | None:
+        min_angles: List[float] = []
+        max_angles: List[float] = []
+        for polygon, _region in pieces:
+            poly = clean_polygon(polygon, self.tol)
+            if len(poly) < 3:
+                return None
+            center = midpoint_subdivision_center(poly)
+            mids = self._midpoint_subdivision_mids(poly, moved_points, moved_keys)
+            for i, vertex in enumerate(poly):
+                quad = clean_polygon([vertex, mids[i], center, mids[(i - 1) % len(poly)]], self.tol)
+                if len(quad) != 4:
+                    return None
+                angles = quad_angles(quad, self.tol)
+                if not angles:
+                    return None
+                min_angles.append(min(angles))
+                max_angles.append(max(angles))
+                if require_region_consistency:
+                    quad_center = np.mean(quad, axis=0)
+                    quad_region = -1 if float(self.domain.sdf(quad_center)) <= 0.0 else 1
+                    if quad_region != _region:
+                        return None
+        if not min_angles:
+            return None
+        return min(min_angles), max(max_angles)
 
     def _segment_polygon_intersections(
         self,
@@ -1317,38 +1068,6 @@ def quad_angles(quad: np.ndarray, tol: float) -> List[float]:
     return angles
 
 
-def representative_point(polygon: np.ndarray, tol: float) -> np.ndarray:
-    poly = np.asarray(polygon, dtype=float)
-    centroid = polygon_centroid(poly)
-    if point_in_polygon(centroid, poly, tol):
-        return centroid
-
-    n = len(poly)
-    for i in range(n):
-        tri = np.asarray([poly[i], poly[(i + 1) % n], poly[(i + 2) % n]], dtype=float)
-        if abs(polygon_area(tri)) <= tol * tol:
-            continue
-        candidate = np.mean(tri, axis=0)
-        if point_in_polygon(candidate, poly, tol):
-            return candidate
-
-    span = max(float(np.ptp(poly[:, 0])), float(np.ptp(poly[:, 1])), 1.0)
-    for i, a in enumerate(poly):
-        b = poly[(i + 1) % n]
-        edge = b - a
-        length = float(np.linalg.norm(edge))
-        if length <= tol:
-            continue
-        normal = np.array([-edge[1], edge[0]], dtype=float) / length
-        midpoint = 0.5 * (a + b)
-        for scale in (1.0e-8, 1.0e-6, 1.0e-4, 1.0e-3):
-            candidate = midpoint + scale * span * normal
-            if point_in_polygon(candidate, poly, tol):
-                return candidate
-
-    return centroid
-
-
 def point_in_polygon(point: np.ndarray, polygon: np.ndarray, tol: float) -> bool:
     p = np.asarray(point, dtype=float)
     n = len(polygon)
@@ -1363,20 +1082,6 @@ def point_in_polygon(point: np.ndarray, polygon: np.ndarray, tol: float) -> bool
         ):
             inside = not inside
     return inside
-
-
-def polygon_is_convex(polygon: np.ndarray, tol: float) -> bool:
-    if len(polygon) < 4:
-        return True
-    for i, point in enumerate(polygon):
-        prev = polygon[(i - 1) % len(polygon)]
-        nxt = polygon[(i + 1) % len(polygon)]
-        a = point - prev
-        b = nxt - point
-        scale = max(float(np.linalg.norm(a) * np.linalg.norm(b)), 1.0)
-        if cross2(a, b) < -tol * scale:
-            return False
-    return True
 
 
 def point_on_segment(point: np.ndarray, a: np.ndarray, b: np.ndarray, tol: float) -> bool:

@@ -21,27 +21,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default="outputs/circle", help="output prefix or directory/name")
     parser.add_argument("--inside-only", action="store_true", help="only output the interior mesh")
     parser.add_argument("--adaptive", action="store_true", help="adaptive quadtree mode with 2-ref transition templates")
-    parser.add_argument(
-        "--dense-boundary",
-        action="store_true",
-        help="disable shortest-segment sparse stopping for adaptive polyline inputs",
-    )
-    parser.add_argument(
-        "--sparse-boundary-ratio",
-        type=float,
-        default=1.0,
-        help="target adaptive boundary cell size as a multiple of the shortest input segment",
-    )
-    parser.add_argument(
-        "--no-quality-relaxation",
-        action="store_true",
-        help="compatibility option; local relaxation is disabled by default",
-    )
-    parser.add_argument(
-        "--quality-relaxation",
-        action="store_true",
-        help="enable optional local non-boundary vertex relaxation for stricter angle quality",
-    )
     parser.add_argument("--no-plot", action="store_true", help="skip PNG plot generation")
     return parser
 
@@ -58,9 +37,6 @@ def main(argv: list[str] | None = None) -> None:
         boundary_band=args.boundary_band,
         include_exterior=not args.inside_only,
         adaptive=args.adaptive,
-        sparse_boundary=not args.dense_boundary,
-        sparse_boundary_ratio=args.sparse_boundary_ratio,
-        quality_relaxation=args.quality_relaxation and not args.no_quality_relaxation,
     )
     mesh = mesher.generate()
     prefix = Path(args.out)
@@ -72,14 +48,9 @@ def main(argv: list[str] | None = None) -> None:
         plot_mesh(mesh, domain, prefix.with_suffix(".png"))
 
     report = {
-        "settings": {
-            "effective_depth": mesher.last_effective_depth,
-            "sparse_attempts": mesher.last_sparse_attempts,
-        },
         "quality": mesh.quality(),
         "quality_by_region": mesh.quality_by_region(),
         "topology": mesh.topology(domain.sdf),
-        "paper_quadtree": mesher._paper_quadtree_report(mesher.last_quadtree),
     }
     prefix.with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
