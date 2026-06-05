@@ -681,8 +681,9 @@ class AllQuadMesher:
             ]
             children = split_polygon_by_vertex_spokes(parent, vertex, local_points, self.tol)
             for poly in children:
-                if len(poly) >= 3:
-                    pieces.append((poly, region))
+                for piece in self._decompose_vertex_piece(poly, vertex):
+                    if len(piece) >= 3:
+                        pieces.append((piece, region))
 
         if self._midpoint_pieces_are_usable(
             pieces,
@@ -704,6 +705,31 @@ class AllQuadMesher:
         if searched:
             return searched
         return []
+
+    def _decompose_vertex_piece(self, polygon: np.ndarray, vertex: np.ndarray) -> List[np.ndarray]:
+        poly = clean_polygon(polygon, self.tol)
+        if len(poly) < 4:
+            return [poly]
+
+        vertex_index = find_point_index(list(poly), vertex, self.tol)
+        if vertex_index is None:
+            return [poly]
+
+        edge_midpoints: List[np.ndarray] = []
+        for index, point in enumerate(poly):
+            next_index = (index + 1) % len(poly)
+            if index == vertex_index or next_index == vertex_index:
+                continue
+            nxt = poly[next_index]
+            if np.linalg.norm(nxt - point) > self.tol:
+                edge_midpoints.append(0.5 * (point + nxt))
+
+        if not edge_midpoints:
+            return [poly]
+
+        split = split_polygon_by_vertex_spokes(poly, vertex, edge_midpoints, self.tol)
+        pieces = [piece for piece in split if len(piece) >= 3]
+        return pieces or [poly]
 
     def _search_vertex_spoke_template(
         self,
